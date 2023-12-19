@@ -8,15 +8,7 @@ import (
 	"net"
 )
 
-type Request struct {
-	Op    string
-	Value string
-}
-
-type Response struct {
-	Value string
-}
-
+// 序列化处理------------------------------------------------------------------------------------------------------------------------------
 type Codec interface {
 	Encode(interface{}) error
 	Decode(interface{}) error
@@ -66,54 +58,115 @@ func (c *TransparentCodec) Decode(v interface{}) error {
 	return nil
 }
 
-func sendRequests(codec Codec, sendCh chan *Request, errCh chan error) {
-	for req := range sendCh {
-		err := codec.Encode(req)
-		if err != nil {
-			errCh <- err
-			return
-		}
-	}
+// 发送接收代码------------------------------------------------------------------------------------------------------------------------------
+type MyPack struct {
+	Type  string
+	Value string
 }
 
-func receiveResponses(codec Codec, recvCh chan *Response, errCh chan error) {
-	for {
-		res := &Response{}
-		err := codec.Decode(res)
-		if err != nil {
-			errCh <- err
-			return
-		}
-		recvCh <- res
-	}
+type Client struct {
+	codec       Codec
+	sendCh      chan *MyPack
+	recvCh      chan *MyPack
+	serverReqCh chan *MyPack
+	errCh       chan error
 }
-func main() {
-	conn, _ := net.Dial("tcp", "127.0.0.1:6688")
-	defer conn.Close()
+
+func Dial(address string) (*Client, error) {
+	conn, err := net.Dial("tcp", address)
+	if err != nil {
+		return nil, err
+	}
 
 	codec := NewTransparentCodec(conn)
 
-	sendCh := make(chan *Request)
-	recvCh := make(chan *Response)
-	errCh := make(chan error)
+	client := &Client{
+		codec:  codec,
+		sendCh: make(chan *MyPack),
+		recvCh: make(chan *MyPack),
+		errCh:  make(chan error),
+	}
 
-	go sendRequests(codec, sendCh, errCh)
-	go receiveResponses(codec, recvCh, errCh)
+	go client.sendRequests()
+	go client.receiveResponses()
 
-	for {
-		req := &Request{
-			Op:    "upper",
-			Value: "hello world",
-		}
+	return client, nil
+}
 
-		sendCh <- req
-
-		select {
-		case res := <-recvCh:
-			fmt.Println("Server reply:", res.Value)
-		case err := <-errCh:
-			fmt.Println("Error:", err)
+func (c *Client) sendRequests() {
+	for req := range c.sendCh {
+		err := c.codec.Encode(req)
+		if err != nil {
+			c.errCh <- err
 			return
 		}
 	}
+}
+
+func (c *Client) receiveResponses() {
+	for {
+		res := &MyPack{}
+		err := c.codec.Decode(res)
+		if err != nil {
+			c.errCh <- err
+			return
+		}
+		switch res.Type {
+		case "Response":
+
+			c.recvCh <- res
+
+		case "ServerRequest":
+
+			c.serverReqCh <- res
+
+		default:
+			c.errCh <- fmt.Errorf("unknown message type: %s", res.Type)
+			return
+		}
+
+	}
+}
+
+func (c *Client) Call(req *MyPack) (*MyPack, error) {
+	c.sendCh <- req
+
+	select {
+	case res := <-c.recvCh:
+		return res, nil
+	case err := <-c.errCh:
+		return nil, err
+	}
+}
+
+func (c *Client) HandleServerRequest(handler func(*MyPack)) {
+	for req := range c.serverReqCh {
+		handler(req)
+	}
+}
+
+func main() {
+	client, err := Dial("127.0.0.1:6688")
+	if err != nil {
+		fmt.Println("Error:", err)
+		return
+	}
+
+	go client.HandleServerRequest(func(req *MyPack) {
+		println("这是一个来自服务端的rpc调用", req.Value)
+		// handle the server request
+	})
+
+	req := &MyPack{
+		Type:  "Request",
+		Value: "hello world",
+	}
+
+	res, err := client.Call(req)
+	if err != nil {
+		fmt.Println("Error:", err)
+		return
+	}
+
+	fmt.Println("Server reply:", res.Value)
 }
