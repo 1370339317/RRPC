@@ -6,13 +6,14 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"sync/atomic"
 )
 
-// 序列化处理------------------------------------------------------------------------------------------------------------------------------
 type Codec interface {
 	Encode(interface{}) error
 	Decode(interface{}) error
 }
+
 type TransparentCodec struct {
 	conn net.Conn
 }
@@ -22,7 +23,6 @@ func NewTransparentCodec(conn net.Conn) *TransparentCodec {
 }
 
 func (c *TransparentCodec) Encode(v interface{}) error {
-
 	data, err := json.Marshal(v)
 	if err != nil {
 		return fmt.Errorf("TransparentCodec: unsupported data type %T", v)
@@ -32,24 +32,20 @@ func (c *TransparentCodec) Encode(v interface{}) error {
 }
 
 func (c *TransparentCodec) Decode(v interface{}) error {
-	// 创建一个长度为4的切片来读取头部
 	header := make([]byte, 4)
 	_, err := io.ReadFull(c.conn, header)
 	if err != nil {
 		return err
 	}
 
-	// 将头部转换为整数，这是消息的长度
 	length := binary.BigEndian.Uint32(header)
 
-	// 创建一个切片来读取消息
 	data := make([]byte, length)
 	_, err = io.ReadFull(c.conn, data)
 	if err != nil {
 		return err
 	}
 
-	// 使用json.Unmarshal函数将消息反序列化为v指向的值
 	err = json.Unmarshal(data, v)
 	if err != nil {
 		return fmt.Errorf("TransparentCodec: failed to unmarshal data: %v", err)
@@ -58,8 +54,8 @@ func (c *TransparentCodec) Decode(v interface{}) error {
 	return nil
 }
 
-// 发送接收代码------------------------------------------------------------------------------------------------------------------------------
 type MyPack struct {
+	ID    uint64
 	Type  string
 	Value string
 }
@@ -70,6 +66,8 @@ type Client struct {
 	recvCh      chan *MyPack
 	serverReqCh chan *MyPack
 	errCh       chan error
+	seq         uint64
+	resChs      map[uint64]chan *MyPack
 }
 
 func Dial(address string) (*Client, error) {
@@ -81,10 +79,12 @@ func Dial(address string) (*Client, error) {
 	codec := NewTransparentCodec(conn)
 
 	client := &Client{
-		codec:  codec,
-		sendCh: make(chan *MyPack),
-		recvCh: make(chan *MyPack),
-		errCh:  make(chan error),
+		codec:       codec,
+		sendCh:      make(chan *MyPack),
+		recvCh:      make(chan *MyPack),
+		serverReqCh: make(chan *MyPack),
+		errCh:       make(chan error),
+		resChs:      make(map[uint64]chan *MyPack),
 	}
 
 	go client.sendRequests()
@@ -94,6 +94,7 @@ func Dial(address string) (*Client, error) {
 }
 
 func (c *Client) sendRequests() {
+	defer close(c.sendCh)
 	for req := range c.sendCh {
 		err := c.codec.Encode(req)
 		if err != nil {
@@ -104,6 +105,13 @@ func (c *Client) sendRequests() {
 }
 
 func (c *Client) receiveResponses() {
+	defer func() {
+		for _, ch := range c.resChs {
+			close(ch)
+		}
+		close(c.recvCh)
+		close(c.serverReqCh)
+	}()
 	for {
 		res := &MyPack{}
 		err := c.codec.Decode(res)
@@ -113,26 +121,29 @@ func (c *Client) receiveResponses() {
 		}
 		switch res.Type {
 		case "Response":
-
-			c.recvCh <- res
-
+			if ch, ok := c.resChs[res.ID]; ok {
+				ch <- res
+				delete(c.resChs, res.ID)
+			} else {
+				c.errCh <- fmt.Errorf("no channel found for response ID %d", res.ID)
+			}
 		case "ServerRequest":
-
 			c.serverReqCh <- res
-
 		default:
 			c.errCh <- fmt.Errorf("unknown message type: %s", res.Type)
 			return
 		}
-
 	}
 }
 
 func (c *Client) Call(req *MyPack) (*MyPack, error) {
+	req.ID = atomic.AddUint64(&c.seq, 1)
+	resCh := make(chan *MyPack)
+	c.resChs[req.ID] = resCh
 	c.sendCh <- req
 
 	select {
-	case res := <-c.recvCh:
+	case res := <-resCh:
 		return res, nil
 	case err := <-c.errCh:
 		return nil, err
@@ -154,7 +165,6 @@ func main() {
 
 	go client.HandleServerRequest(func(req *MyPack) {
 		println("这是一个来自服务端的rpc调用", req.Value)
-		// handle the server request
 	})
 
 	req := &MyPack{
