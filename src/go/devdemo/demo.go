@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -86,7 +87,8 @@ type MyPack struct {
 	ID         uint64
 	Type       string // 报文类型：Request, Response, ServerRequest
 	MethodName string // 函数名
-	Value      string
+	Args       string // 请求参数
+	Result     string // 响应结果
 }
 
 const (
@@ -95,7 +97,19 @@ const (
 	ServerRequestType = "ServerRequest"
 )
 
-type HandlerFunc func(*MyPack) (string, error)
+type Request struct {
+	Value string
+}
+type Response struct {
+	Value string
+}
+
+type InvokeResult struct {
+	Result string
+	Err    error
+}
+
+type HandlerFunc func(*Request, *Response) error
 
 type Client struct {
 	codec       Codec
@@ -196,11 +210,76 @@ func (c *Client) Call(req *MyPack) (*MyPack, error) {
 		return nil, err
 	}
 }
+
+func setArgValue(v reflect.Value, result interface{}) error {
+	if v.Kind() == reflect.Ptr {
+		switch v.Elem().Kind() {
+		case reflect.Int:
+			v.Elem().SetInt(int64(result.(float64)))
+		case reflect.Float64:
+			v.Elem().SetFloat(result.(float64))
+		case reflect.String:
+			v.Elem().SetString(result.(string))
+		case reflect.Bool:
+			v.Elem().SetBool(result.(bool))
+		// ... 其他类型
+		default:
+			return fmt.Errorf("unsupported type: %s", v.Elem().Type())
+		}
+	}
+	return nil
+}
+
+func (c *Client) Invoke(method string, args ...interface{}) *InvokeResult {
+	// 将参数序列化为JSON字符串
+	value, err := json.Marshal(args)
+	if err != nil {
+		return &InvokeResult{Err: fmt.Errorf("failed to marshal args: %v", err)}
+	}
+
+	// 创建请求对象
+	req := &MyPack{
+		Type:       RequestType,
+		MethodName: method,
+		Args:       string(value),
+	}
+
+	// 发送请求并获取响应
+	res, err := c.Call(req)
+	if err != nil {
+		return &InvokeResult{Err: err}
+	}
+
+	// 反序列化参数的引用
+	var result []interface{}
+	err = json.Unmarshal([]byte(res.Args), &result)
+	if err != nil {
+		return &InvokeResult{Err: fmt.Errorf("failed to unmarshal result: %v", err)}
+	}
+
+	// 创建结果对象
+	invokeResult := &InvokeResult{
+		Result: res.Result,
+		Err:    nil,
+	}
+
+	// 更新指针参数的值
+	for i, arg := range args {
+		err := setArgValue(reflect.ValueOf(arg), result[i])
+		if err != nil {
+			invokeResult.Err = err
+			break
+		}
+	}
+
+	return invokeResult
+}
+
 func (c *Client) Reply(req *MyPack, value string) error {
 	res := &MyPack{
-		ID:    req.ID, // 使用原来请求的ID
-		Type:  ResponseType,
-		Value: value,
+		ID:     req.ID, // 使用原来请求的ID
+		Type:   ResponseType,
+		Result: value,
 	}
 	c.sendCh <- res
 	return nil
@@ -209,23 +288,25 @@ func (c *Client) Reply(req *MyPack, value string) error {
 func (c *Client) HandleServerRequest() {
 	c.pool.Start() // 启动工作池
 	go func() {
-		for req := range c.serverReqCh {
-			handler, ok := c.handlerMap[req.MethodName]
+		for pack := range c.serverReqCh {
+			handler, ok := c.handlerMap[pack.MethodName]
 
 			if ok {
 				c.pool.Submit(func() {
-					value, err := handler(req)
+					req := &Request{Value: pack.Args}
+					res := &Response{} // 创建一个响应对象
+					err := handler(req, res)
 					if err != nil {
 						fmt.Printf("Handler error: %s\n", err)
 						return
 					}
-					err = c.Reply(req, value)
+					err = c.Reply(pack, res.Value)
 					if err != nil {
 						fmt.Printf("Reply error: %s\n", err)
 					}
 				})
 			} else {
-				fmt.Printf("No handler found for %s\n", req.Type)
+				fmt.Printf("No handler found for %s\n", pack.Type)
 			}
 		}
 	}()
@@ -242,32 +323,31 @@ func main() {
 		return
 	}
 
-	client.RegisterHandler("ToUpper", func(req *MyPack) (string, error) {
+	client.RegisterHandler("ToUpper", func(req *Request, res *Response) error {
+		// 这是你的函数，你可以在这里处理服务器的RPC请求
+		fmt.Println("收到来自服务器的RPC请求:", req.Value)
+
 		// 这是你的函数，你可以在这里处理服务器的RPC请求
 		fmt.Println("收到来自服务器的RPC请求:", req.Value)
 
 		// 假设服务器请求的是一个字符串转大写的操作
-		value := strings.ToUpper(req.Value)
+		res.Value = strings.ToUpper(req.Value)
 
-		// 返回结果和错误
-		return value, nil
+		// 返回错误
+		return nil
 	})
 
-	client.RegisterHandler("ToLower", func(req *MyPack) (string, error) {
+	client.RegisterHandler("ToLower", func(req *Request, res *Response) error {
 		// 这是另一个函数，你可以在这里处理服务器的RPC请求
-		return "", nil
+		return nil
 	})
+
 	client.HandleServerRequest() // 启动处理服务端请求的goroutine
-	req := &MyPack{
-		Type:  "Request",
-		Value: "hello world",
-	}
 
-	res, err := client.Call(req)
-	if err != nil {
-		fmt.Println("Error:", err)
-		return
+	arg1 := 1
+	result := client.Invoke("ToUpper", "hello", &arg1, 2, 3)
+	if result.Err != nil {
+		fmt.Println("Invoke error:", result.Err)
 	}
-
-	fmt.Println("Server reply:", res.Value)
+	fmt.Println("Server reply:", result.Result)
 }
