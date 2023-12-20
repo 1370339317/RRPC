@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
+	"sync"
 	"sync/atomic"
 )
 
@@ -54,11 +56,46 @@ func (c *TransparentCodec) Decode(v interface{}) error {
 	return nil
 }
 
-type MyPack struct {
-	ID    uint64
-	Type  string
-	Value string
+type WorkerPool struct {
+	workers int
+	jobs    chan func()
 }
+
+func NewWorkerPool(workers int, handler func(*MyPack)) *WorkerPool {
+	return &WorkerPool{
+		workers: workers,
+		jobs:    make(chan func()),
+	}
+}
+
+func (p *WorkerPool) Start() {
+	for i := 0; i < p.workers; i++ {
+		go func() {
+			for job := range p.jobs {
+				job() // 调用函数
+			}
+		}()
+	}
+}
+
+func (p *WorkerPool) Submit(job func()) {
+	p.jobs <- job
+}
+
+type MyPack struct {
+	ID         uint64
+	Type       string // 报文类型：Request, Response, ServerRequest
+	MethodName string // 函数名
+	Value      string
+}
+
+const (
+	RequestType       = "Request"
+	ResponseType      = "Response"
+	ServerRequestType = "ServerRequest"
+)
+
+type HandlerFunc func(*MyPack) (string, error)
 
 type Client struct {
 	codec       Codec
@@ -67,7 +104,9 @@ type Client struct {
 	serverReqCh chan *MyPack
 	errCh       chan error
 	seq         uint64
-	resChs      map[uint64]chan *MyPack
+	resChs      sync.Map
+	handlerMap  map[string]HandlerFunc
+	pool        *WorkerPool
 }
 
 func Dial(address string) (*Client, error) {
@@ -78,13 +117,17 @@ func Dial(address string) (*Client, error) {
 
 	codec := NewTransparentCodec(conn)
 
+	pool := NewWorkerPool(10, nil) // 创建一个没有处理函数的WorkerPool
+
 	client := &Client{
 		codec:       codec,
 		sendCh:      make(chan *MyPack),
 		recvCh:      make(chan *MyPack),
 		serverReqCh: make(chan *MyPack),
 		errCh:       make(chan error),
-		resChs:      make(map[uint64]chan *MyPack),
+		resChs:      sync.Map{},
+		handlerMap:  make(map[string]HandlerFunc),
+		pool:        pool,
 	}
 
 	go client.sendRequests()
@@ -106,9 +149,10 @@ func (c *Client) sendRequests() {
 
 func (c *Client) receiveResponses() {
 	defer func() {
-		for _, ch := range c.resChs {
-			close(ch)
-		}
+		c.resChs.Range(func(key, value interface{}) bool {
+			close(value.(chan *MyPack))
+			return true
+		})
 		close(c.recvCh)
 		close(c.serverReqCh)
 	}()
@@ -121,9 +165,11 @@ func (c *Client) receiveResponses() {
 		}
 		switch res.Type {
 		case "Response":
-			if ch, ok := c.resChs[res.ID]; ok {
+			value, ok := c.resChs.Load(res.ID)
+			if ok {
+				ch := value.(chan *MyPack)
 				ch <- res
-				delete(c.resChs, res.ID)
+				c.resChs.Delete(res.ID)
 			} else {
 				c.errCh <- fmt.Errorf("no channel found for response ID %d", res.ID)
 			}
@@ -137,9 +183,10 @@ func (c *Client) receiveResponses() {
 }
 
 func (c *Client) Call(req *MyPack) (*MyPack, error) {
+	req.Type = RequestType // Call方法
 	req.ID = atomic.AddUint64(&c.seq, 1)
 	resCh := make(chan *MyPack)
-	c.resChs[req.ID] = resCh
+	c.resChs.Store(req.ID, resCh)
 	c.sendCh <- req
 
 	select {
@@ -149,11 +196,43 @@ func (c *Client) Call(req *MyPack) (*MyPack, error) {
 		return nil, err
 	}
 }
-
-func (c *Client) HandleServerRequest(handler func(*MyPack)) {
-	for req := range c.serverReqCh {
-		handler(req)
+func (c *Client) Reply(req *MyPack, value string) error {
+	res := &MyPack{
+		ID:    req.ID, // 使用原来请求的ID
+		Type:  ResponseType,
+		Value: value,
 	}
+	c.sendCh <- res
+	return nil
+}
+
+func (c *Client) HandleServerRequest() {
+	c.pool.Start() // 启动工作池
+	go func() {
+		for req := range c.serverReqCh {
+			handler, ok := c.handlerMap[req.MethodName]
+
+			if ok {
+				c.pool.Submit(func() {
+					value, err := handler(req)
+					if err != nil {
+						fmt.Printf("Handler error: %s\n", err)
+						return
+					}
+					err = c.Reply(req, value)
+					if err != nil {
+						fmt.Printf("Reply error: %s\n", err)
+					}
+				})
+			} else {
+				fmt.Printf("No handler found for %s\n", req.Type)
+			}
+		}
+	}()
+}
+
+func (c *Client) RegisterHandler(name string, handler HandlerFunc) {
+	c.handlerMap[name] = handler
 }
 
 func main() {
@@ -163,10 +242,22 @@ func main() {
 		return
 	}
 
-	go client.HandleServerRequest(func(req *MyPack) {
-		println("这是一个来自服务端的rpc调用", req.Value)
+	client.RegisterHandler("ToUpper", func(req *MyPack) (string, error) {
+		// 这是你的函数，你可以在这里处理服务器的RPC请求
+		fmt.Println("收到来自服务器的RPC请求:", req.Value)
+
+		// 假设服务器请求的是一个字符串转大写的操作
+		value := strings.ToUpper(req.Value)
+
+		// 返回结果和错误
+		return value, nil
 	})
 
+	client.RegisterHandler("ToLower", func(req *MyPack) (string, error) {
+		// 这是另一个函数，你可以在这里处理服务器的RPC请求
+		return "", nil
+	})
+	client.HandleServerRequest() // 启动处理服务端请求的goroutine
 	req := &MyPack{
 		Type:  "Request",
 		Value: "hello world",
