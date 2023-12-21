@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 type Codec interface {
@@ -97,19 +99,12 @@ const (
 	ServerRequestType = "ServerRequest"
 )
 
-type Request struct {
-	Value string
-}
-type Response struct {
-	Value string
-}
-
 type InvokeResult struct {
 	Result string
 	Err    error
 }
 
-type HandlerFunc func(*Request, *Response) error
+type HandlerFunc interface{}
 
 type Client struct {
 	codec       Codec
@@ -286,68 +281,235 @@ func (c *Client) Reply(req *MyPack, value string) error {
 }
 
 func (c *Client) HandleServerRequest() {
-	c.pool.Start() // 启动工作池
+	c.pool.Start()
 	go func() {
 		for pack := range c.serverReqCh {
 			handler, ok := c.handlerMap[pack.MethodName]
-
-			if ok {
-				c.pool.Submit(func() {
-					req := &Request{Value: pack.Args}
-					res := &Response{} // 创建一个响应对象
-					err := handler(req, res)
-					if err != nil {
-						fmt.Printf("Handler error: %s\n", err)
-						return
-					}
-					err = c.Reply(pack, res.Value)
-					if err != nil {
-						fmt.Printf("Reply error: %s\n", err)
-					}
-				})
-			} else {
+			if !ok {
 				fmt.Printf("No handler found for %s\n", pack.Type)
+				continue
 			}
+
+			c.pool.Submit(func() {
+				defer func() {
+					if r := recover(); r != nil {
+						fmt.Printf("Handler panic: %v\n", r)
+					}
+				}()
+				// 解析参数数组
+				var args []interface{}
+				err := json.Unmarshal([]byte(pack.Args), &args)
+				if err != nil {
+					fmt.Printf("Failed to unmarshal args: %v\n", err)
+					return
+				}
+
+				// 反射创建函数参数
+				funcValue := reflect.ValueOf(handler)
+				funcType := funcValue.Type()
+				numIn := funcType.NumIn()
+
+				// 检查参数数量
+				if len(args) != numIn {
+					fmt.Printf("Wrong number of arguments for %s: expected %d, got %d\n", pack.MethodName, numIn, len(args))
+					return
+				}
+
+				in := make([]reflect.Value, numIn)
+				for i := range in {
+					in[i] = reflect.New(funcType.In(i)).Elem()
+				}
+
+				// 将解析的参数值赋给函数参数
+				for i, arg := range args {
+					argValue := reflect.ValueOf(arg)
+					if argValue.Type() != in[i].Type() {
+						if argValue.Kind() == reflect.Float64 && in[i].Kind() == reflect.Int {
+							// 将 float64 类型转换为 int 类型
+							in[i].SetInt(int64(argValue.Float()))
+						} else {
+							fmt.Printf("Wrong type of argument for %s: expected %s, got %s\n", pack.MethodName, in[i].Type(), argValue.Type())
+							return
+						}
+					} else {
+						in[i].Set(argValue)
+					}
+				}
+
+				// 反射调用处理函数
+				out := funcValue.Call(in)
+
+				// 获取处理函数的返回值
+				var result string
+				var returnErr error
+				if len(out) > 0 {
+					if len(out) == 2 {
+						// 如果有两个返回值，那么第二个应该是 error 类型
+						if err, ok := out[1].Interface().(error); ok {
+							returnErr = err
+						}
+					}
+					result = fmt.Sprintf("%v", out[0].Interface())
+				}
+
+				if returnErr != nil {
+					fmt.Printf("Handler error: %s\n", returnErr)
+					return
+				}
+
+				err = c.Reply(pack, result)
+				if err != nil {
+					fmt.Printf("Reply error: %s\n", err)
+				}
+			})
 		}
 	}()
 }
 
 func (c *Client) RegisterHandler(name string, handler HandlerFunc) {
+	v := reflect.ValueOf(handler)
+	if v.Kind() != reflect.Func {
+		fmt.Printf("Handler is not a function: %s\n", name)
+		return
+	}
 	c.handlerMap[name] = handler
 }
 
+func (c *Client) GenerateDocs() string {
+	var docs []map[string]interface{}
+
+	for name, handler := range c.handlerMap {
+		handlerType := reflect.TypeOf(handler)
+		var params []string
+		var returns []string
+
+		for i := 0; i < handlerType.NumIn(); i++ {
+			params = append(params, handlerType.In(i).String())
+		}
+
+		for i := 0; i < handlerType.NumOut(); i++ {
+			returns = append(returns, handlerType.Out(i).String())
+		}
+
+		doc := map[string]interface{}{
+			"function":   name,
+			"parameters": params,
+			"returns":    returns,
+		}
+
+		docs = append(docs, doc)
+	}
+
+	jsonDocs, err := json.MarshalIndent(docs, "", "  ")
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	fmt.Println(string(jsonDocs))
+	return string(jsonDocs)
+}
+
+func GenerateWrappers(doc string) {
+	var funcs []struct {
+		Function   string   `json:"function"`
+		Parameters []string `json:"parameters"`
+		Returns    []string `json:"returns"`
+	}
+
+	err := json.Unmarshal([]byte(doc), &funcs)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	fmt.Println("type MyServiceClient struct {")
+	fmt.Println("\tclient *Client")
+	fmt.Println("}")
+
+	for _, f := range funcs {
+		fmt.Printf("\nfunc (s *MyServiceClient) %s(", f.Function)
+		for i, p := range f.Parameters {
+			if i > 0 {
+				fmt.Print(", ")
+			}
+			fmt.Printf("arg%d %s", i, p)
+		}
+		fmt.Print(") (")
+		for i, r := range f.Returns {
+			if i > 0 {
+				fmt.Print(", ")
+			}
+			if r == "error" {
+				fmt.Print("error")
+			} else {
+				fmt.Printf("ret%d %s", i, r)
+			}
+		}
+		fmt.Println(") {")
+		fmt.Printf("\tresult := s.client.Invoke(\"%s\"", f.Function)
+		for i := range f.Parameters {
+			fmt.Printf(", arg%d", i)
+		}
+		fmt.Println(")")
+		fmt.Println("\tif result.Err != nil {")
+		fmt.Print("\t\treturn ")
+		for i, r := range f.Returns {
+			if i > 0 {
+				fmt.Print(", ")
+			}
+			if r == "error" {
+				fmt.Print("result.Err")
+			} else {
+				fmt.Print("nil")
+			}
+		}
+		fmt.Println("\n\t}")
+		fmt.Print("\treturn ")
+		for i, r := range f.Returns {
+			if i > 0 {
+				fmt.Print(", ")
+			}
+			if r == "error" {
+				fmt.Print("nil")
+			} else {
+				fmt.Printf("strconv.Atoi(result.Result)")
+			}
+		}
+		fmt.Println("\n}")
+	}
+}
+
 func main() {
+	MakeWrapper("rpcprovider.go", "rpcwrapper.go")
 	client, err := Dial("127.0.0.1:6688")
 	if err != nil {
 		fmt.Println("Error:", err)
 		return
 	}
 
-	client.RegisterHandler("ToUpper", func(req *Request, res *Response) error {
-		// 这是你的函数，你可以在这里处理服务器的RPC请求
-		fmt.Println("收到来自服务器的RPC请求:", req.Value)
+	client.RegisterHandler("ToUpper",
+		func(s string, a1, a2, a3 int) string {
+			// 这是你的函数，你可以在这里处理服务器的RPC请求
+			fmt.Println("收到来自服务器的RPC请求:", s)
+			return strings.ToUpper(s)
+		})
 
-		// 这是你的函数，你可以在这里处理服务器的RPC请求
-		fmt.Println("收到来自服务器的RPC请求:", req.Value)
-
-		// 假设服务器请求的是一个字符串转大写的操作
-		res.Value = strings.ToUpper(req.Value)
-
-		// 返回错误
-		return nil
-	})
-
-	client.RegisterHandler("ToLower", func(req *Request, res *Response) error {
-		// 这是另一个函数，你可以在这里处理服务器的RPC请求
-		return nil
-	})
+	client.RegisterHandler("Add",
+		func(a, b int) int {
+			// 这是另一个函数，你可以在这里处理服务器的RPC请求
+			fmt.Println("收到来自服务器的RPC请求:", a, b)
+			return a + b
+		})
 
 	client.HandleServerRequest() // 启动处理服务端请求的goroutine
 
-	arg1 := 1
+	GenerateWrappers(client.GenerateDocs())
+
+	arg1 := 1 //测试引用参返回数据
 	result := client.Invoke("ToUpper", "hello", &arg1, 2, 3)
 	if result.Err != nil {
 		fmt.Println("Invoke error:", result.Err)
 	}
 	fmt.Println("Server reply:", result.Result)
+
+	time.Sleep(666 * time.Second)
 }
