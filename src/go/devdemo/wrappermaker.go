@@ -12,18 +12,25 @@ import (
 )
 
 // 函数模板
-const tmpl = `func (c *Client) {{.Name}}({{range $index, $param := .Params}}{{if $index}}, {{end}}{{$param.Name}} {{$param.Type}}{{end}}) ({{range $index, $ret := .Results}}{{if $index}}, {{end}}{{$ret}}{{end}}, error) {
-    result := c.Invoke("{{.Name}}", {{range $index, $param := .Params}}{{if $index}}, {{end}}{{$param.Name}}{{end}})
+const tmpl = `func (pthis *myServiceClient) {{.Name}}({{range $index, $param := .Params}}{{if $index}}, {{end}}{{$param.Name}} {{$param.Type}}{{end}}) ({{range $index, $ret := .Results}}{{if $index}}, {{end}}{{$ret}}{{end}}, error) {
+    result := pthis.client.Invoke("{{.Name}}", {{range $index, $param := .Params}}{{if $index}}, {{end}}{{$param.Name}}{{end}})
+    var err error
+    {{range $index, $ret := .Results}}var zero_{{$index}} {{$ret}}
     if result.Err != nil {
-        {{range $index, $ret := .Results}}var zero_{{$index}} {{$ret}}
-        switch v := zeroValue("{{$ret}}").(type) {
-        case {{$ret}}:
-            zero_{{$index}} = v
+        err = result.Err
+    } else {
+        var results []interface{}
+        err = json.Unmarshal([]byte(result.Result), &results)
+        if err == nil {
+            zero_{{$index}} = results[{{$index}}].({{$ret}})
         }
-        {{end}}
-        return {{range $index, $ret := .Results}}{{if $index}}, {{end}}zero_{{$index}}{{end}}, result.Err
     }
-    {{if (index .Results 0)}}return {{range $index, $ret := .Results}}{{if $index}}, {{end}}result.Result[{{$index}}].({{$ret}}){{end}}, nil{{else}}return nil, nil{{end}}
+    switch v := pthis.zeroValue("{{$ret}}").(type) {
+    case {{$ret}}:
+        zero_{{$index}} = v
+    }
+    {{end}}
+    return {{range $index, $ret := .Results}}{{if $index}}, {{end}}zero_{{$index}}{{end}}, err
 }
 `
 
@@ -94,12 +101,20 @@ func parseFuncDecl(f *ast.FuncDecl, out *os.File) {
 }
 
 const predefCode = `
+package main
+
 import (
 	"reflect"
 	"strings"
 )
+type myServiceClient struct {
+	client *Client
+}
 
-func zeroValue(typeName string) interface{} {
+func NewMyServiceClient(client *Client) *myServiceClient {
+	return &myServiceClient{client: client}
+}
+func (pthis *myServiceClient)zeroValue(typeName string) interface{} {
 	typeName = strings.TrimPrefix(typeName, "*")
 	t := reflect.TypeOf(typeName)
 	if t == nil {
