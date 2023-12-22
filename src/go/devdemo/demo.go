@@ -8,7 +8,6 @@ import (
 	"log"
 	"net"
 	"reflect"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -100,7 +99,6 @@ type Client struct {
 	resChs      sync.Map
 	handlerMap  map[string]HandlerFunc
 	pool        *WorkerPool
-	listener    net.Listener // 添加这一行
 
 	frameReader io.Reader
 	frameWriter io.Writer
@@ -125,15 +123,6 @@ func (c *Client) readFromConn() ([]byte, error) {
 		}
 		return data[:n], nil
 	}
-}
-
-// 计算校验和的函数，这里只是一个示例，你可以使用更复杂的算法
-func calculateChecksum(data []byte) string {
-	sum := 0
-	for _, b := range data {
-		sum += int(b)
-	}
-	return fmt.Sprintf("%04d", sum%10000) // 返回四位数的校验和
 }
 
 func (c *Client) send(v interface{}) error {
@@ -184,26 +173,81 @@ func Dial(address string) (*Client, error) {
 	return client, nil
 }
 
-func (c *Client) Listen(address string) error {
-	var err error
-	c.listener, err = net.Listen("tcp", address)
+type ClientHandler func(*Client) error
+type Server struct {
+	listener    net.Listener
+	clients     []*Client
+	onNewClient ClientHandler
+}
+
+func NewServer(address string, onNewClient func(*Client) error) (*Server, error) {
+	listener, err := net.Listen("tcp", address)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	go func() {
-		for {
-			conn, err := c.listener.Accept()
-			if err != nil {
-				log.Println("Accept error:", err)
-				continue
-			}
+	server := &Server{
+		listener:    listener,
+		clients:     make([]*Client, 0),
+		onNewClient: onNewClient,
+	}
 
-			go c.handleConnection(conn)
+	go server.acceptConnections()
+
+	return server, nil
+}
+func (s *Server) Close() error {
+	return s.listener.Close()
+}
+func (s *Server) NewClient(conn net.Conn) *Client {
+	codec := NewTransparentCodec()
+	pool := NewWorkerPool(10, nil)
+	protocol := flexpacketprotocol.New(conn, []byte("aacc"), []byte("eezz"))
+	client := &Client{
+		conn:        conn,
+		codec:       codec,
+		sendCh:      make(chan *MyPack),
+		recvCh:      make(chan *MyPack),
+		serverReqCh: make(chan *MyPack),
+		errCh:       make(chan error),
+		resChs:      sync.Map{},
+		handlerMap:  make(map[string]HandlerFunc),
+		pool:        pool,
+		frameReader: protocol,
+		frameWriter: protocol,
+	}
+
+	//必须保证HandleServerRequest早于receiveResponses否则可能发生死锁
+	client.HandleServerRequest()
+	go client.sendRequests()
+	go client.receiveResponses()
+
+	return client
+}
+func (s *Server) acceptConnections() {
+	for {
+		conn, err := s.listener.Accept()
+		if err != nil {
+			log.Println("Accept error:", err)
+			continue
 		}
-	}()
 
-	return nil
+		client := s.NewClient(conn)
+		s.clients = append(s.clients, client)
+		s.handleNewClient(client)
+	}
+}
+
+func (s *Server) handleNewClient(client *Client) {
+
+	// 在这里处理新的连接
+	err := s.onNewClient(client) // 增加这一行
+	if err != nil {
+		log.Println("handle new client error:", err)
+		client.conn.Close()
+		return
+	}
+
 }
 
 // 公共的处理rpc请求
@@ -237,16 +281,35 @@ func (c *Client) handleRequest(req *MyPack, codec Codec) {
 
 	// 反射调用处理函数
 	funcValue := reflect.ValueOf(handler)
+	funcType := funcValue.Type()
 	in := make([]reflect.Value, len(args))
 	for i, arg := range args {
+		argType := funcType.In(i)
+		// 如果参数是float64类型，但是处理函数的参数是int类型，那么将参数转换为int
+		if num, ok := arg.(float64); ok && argType.Kind() == reflect.Int {
+			arg = int(num)
+		}
 		in[i] = reflect.ValueOf(arg)
 	}
 	out := funcValue.Call(in)
+
+	// 将处理函数的参数从反射类型转换回实际的值
+	argsInterface := make([]interface{}, len(in))
+	for i, v := range in {
+		argsInterface[i] = v.Interface()
+	}
+
+	// 将参数序列化为JSON字符串
+	argsJson, err := json.Marshal(argsInterface)
+	if err != nil {
+		// 处理错误
+	}
 
 	// 创建响应对象
 	res := &MyPack{
 		ID:     req.ID,
 		Type:   ResponseType,
+		Args:   string(argsJson),                      // 添加参数
 		Result: fmt.Sprintf("%v", out[0].Interface()), // 假设处理函数总是返回一个结果
 	}
 
@@ -282,7 +345,9 @@ func (c *Client) HandleServerRequest() {
 }
 
 func (c *Client) sendRequests() {
-	defer close(c.sendCh)
+	defer func() {
+		close(c.sendCh)
+	}()
 	for req := range c.sendCh {
 		err := c.send(req)
 		if err != nil {
@@ -309,7 +374,7 @@ func (c *Client) receiveResponses() {
 			return
 		}
 		switch res.Type {
-		case "Response":
+		case ResponseType:
 			value, ok := c.resChs.Load(res.ID)
 			if ok {
 				ch := value.(chan *MyPack)
@@ -318,7 +383,7 @@ func (c *Client) receiveResponses() {
 			} else {
 				c.errCh <- fmt.Errorf("no channel found for response ID %d", res.ID)
 			}
-		case "ServerRequest":
+		case RequestType:
 			c.serverReqCh <- res
 		default:
 			c.errCh <- fmt.Errorf("unknown message type: %s", res.Type)
@@ -530,36 +595,56 @@ func GenerateWrappers(doc string) {
 
 func main() {
 
+	_, err := NewServer("127.0.0.1:6688", func(c *Client) error {
+		c.RegisterHandler("ToUpper", ToUpper)
+		c.RegisterHandler("Add", Add)
+		c.RegisterHandler("Add2", Add2)
+
+		remotestub := Lpcstub{
+			client: c,
+		}
+
+		fmt.Printf("=====新的客户端接入=====\r\n")
+		fmt.Printf("使用桩回调客户端rpc过程Add2\r\n")
+		ret1, ret2, err := remotestub.Add2(1, 2)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("ret1,2:%d %d", ret1, ret2)
+
+		return nil
+	})
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	client, err := Dial("127.0.0.1:6688")
 	if err != nil {
 		fmt.Println("Error:", err)
 		return
 	}
 
-	client.RegisterHandler("ToUpper",
-		func(s string, a1, a2, a3 int) string {
-			// 这是你的函数，你可以在这里处理服务器的RPC请求
-			fmt.Println("收到来自服务器的RPC请求:", s)
-			return strings.ToUpper(s)
-		})
-
-	client.RegisterHandler("Add",
-		func(a, b int) int {
-			// 这是另一个函数，你可以在这里处理服务器的RPC请求
-			fmt.Println("收到来自服务器的RPC请求:", a, b)
-			return a + b
-		})
+	client.RegisterHandler("ToUpper", ToUpper)
+	client.RegisterHandler("Add", Add)
+	client.RegisterHandler("Add2", Add2)
 
 	client.HandleServerRequest() // 启动处理服务端请求的goroutine
 
-	GenerateWrappers(client.GenerateDocs())
+	for i := 0; i < 6; i++ {
 
-	arg1 := 1 //测试引用参返回数据
-	result := client.Invoke("ToUpper", "hello", &arg1, 2, 3)
-	if result.Err != nil {
-		fmt.Println("Invoke error:", result.Err)
+		remotestub := Lpcstub{
+			client: client,
+		}
+
+		ret1, err := remotestub.Add(1, 2)
+		if err != nil {
+			return
+		}
+		fmt.Printf("ret:%d\r\n", ret1)
+		time.Sleep(66666)
 	}
-	fmt.Println("Server reply:", result.Result)
+
+	//GenerateWrappers(client.GenerateDocs())
 
 	time.Sleep(666 * time.Second)
 }

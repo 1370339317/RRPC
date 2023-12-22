@@ -15,19 +15,25 @@ import (
 const tmpl = `func (pthis *{{.ClassName}}) {{.Name}}({{range $index, $param := .Params}}{{if $index}}, {{end}}{{$param.Name}} {{$param.Type}}{{end}}) ({{range $index, $ret := .Results}}{{if $index}}, {{end}}{{$ret}}{{end}}, error) {
     result := pthis.client.Invoke("{{.Name}}", {{range $index, $param := .Params}}{{if $index}}, {{end}}{{$param.Name}}{{end}})
     var err error
-    {{range $index, $ret := .Results}}var zero_{{$index}} {{$ret}}
+    {{if eq (len .Results) 1}} // 如果只有一个返回值
+    var zero_0 {{index .Results 0}}
     if result.Err != nil {
         err = result.Err
     } else {
-        var results []interface{}
+        err = json.Unmarshal([]byte(result.Result), &zero_0)
+    }
+    {{else}} // 如果有多个返回值
+    var results []interface{}
+    {{range $index, $ret := .Results}}var zero_{{$index}} {{$ret}}
+    {{end}}
+    if result.Err != nil {
+        err = result.Err
+    } else {
         err = json.Unmarshal([]byte(result.Result), &results)
         if err == nil {
-            zero_{{$index}} = results[{{$index}}].({{$ret}})
+            {{range $index, $ret := .Results}}zero_{{$index}} = results[{{$index}}].({{$ret}})
+            {{end}}
         }
-    }
-    switch v := pthis.zeroValue("{{$ret}}").(type) {
-    case {{$ret}}:
-        zero_{{$index}} = v
     }
     {{end}}
     return {{range $index, $ret := .Results}}{{if $index}}, {{end}}zero_{{$index}}{{end}}, err
