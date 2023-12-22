@@ -1,10 +1,8 @@
 package main
 
 import (
-	"encoding/binary"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"net"
 	"reflect"
@@ -15,47 +13,31 @@ import (
 )
 
 type Codec interface {
-	Encode(interface{}) error
-	Decode(interface{}) error
+	Encode(interface{}) ([]byte, error)
+	Decode([]byte, interface{}) error
 }
 
-type TransparentCodec struct {
-	conn net.Conn
+type TransparentCodec struct{}
+
+func NewTransparentCodec() *TransparentCodec {
+	return &TransparentCodec{}
 }
 
-func NewTransparentCodec(conn net.Conn) *TransparentCodec {
-	return &TransparentCodec{conn: conn}
-}
-
-func (c *TransparentCodec) Encode(v interface{}) error {
+// Encode 方法返回序列化后的数据，而不是直接写入 conn
+func (c *TransparentCodec) Encode(v interface{}) ([]byte, error) {
 	data, err := json.Marshal(v)
 	if err != nil {
-		return fmt.Errorf("TransparentCodec: unsupported data type %T", v)
+		return nil, fmt.Errorf("TransparentCodec: unsupported data type %T", v)
 	}
-	_, err = c.conn.Write(data)
-	return err
+	return data, nil
 }
 
-func (c *TransparentCodec) Decode(v interface{}) error {
-	header := make([]byte, 4)
-	_, err := io.ReadFull(c.conn, header)
-	if err != nil {
-		return err
-	}
-
-	length := binary.BigEndian.Uint32(header)
-
-	data := make([]byte, length)
-	_, err = io.ReadFull(c.conn, data)
-	if err != nil {
-		return err
-	}
-
-	err = json.Unmarshal(data, v)
+// Decode 方法从数据中反序列化，而不是直接从 conn 读取
+func (c *TransparentCodec) Decode(data []byte, v interface{}) error {
+	err := json.Unmarshal(data, v)
 	if err != nil {
 		return fmt.Errorf("TransparentCodec: failed to unmarshal data: %v", err)
 	}
-
 	return nil
 }
 
@@ -94,9 +76,8 @@ type MyPack struct {
 }
 
 const (
-	RequestType       = "Request"
-	ResponseType      = "Response"
-	ServerRequestType = "ServerRequest"
+	RequestType  = "Request"
+	ResponseType = "Response"
 )
 
 type InvokeResult struct {
@@ -107,6 +88,7 @@ type InvokeResult struct {
 type HandlerFunc interface{}
 
 type Client struct {
+	conn        net.Conn
 	codec       Codec
 	sendCh      chan *MyPack
 	recvCh      chan *MyPack
@@ -116,6 +98,37 @@ type Client struct {
 	resChs      sync.Map
 	handlerMap  map[string]HandlerFunc
 	pool        *WorkerPool
+	listener    net.Listener // 添加这一行
+}
+
+func (c *Client) readFromConn() ([]byte, error) {
+	data := make([]byte, 1024) // 假设我们一次读取 1024 字节
+	_, err := c.conn.Read(data)
+	if err != nil {
+		return nil, err
+	}
+	return data, nil
+}
+
+func (c *Client) writeToConn(data []byte) error {
+	_, err := c.conn.Write(data)
+	return err
+}
+
+func (c *Client) send(v interface{}) error {
+	data, err := c.codec.Encode(v)
+	if err != nil {
+		return err
+	}
+	return c.writeToConn(data)
+}
+
+func (c *Client) receive(v interface{}) error {
+	data, err := c.readFromConn()
+	if err != nil {
+		return err
+	}
+	return c.codec.Decode(data, v)
 }
 
 func Dial(address string) (*Client, error) {
@@ -124,11 +137,12 @@ func Dial(address string) (*Client, error) {
 		return nil, err
 	}
 
-	codec := NewTransparentCodec(conn)
+	codec := NewTransparentCodec()
 
 	pool := NewWorkerPool(10, nil) // 创建一个没有处理函数的WorkerPool
 
 	client := &Client{
+		conn:        conn,
 		codec:       codec,
 		sendCh:      make(chan *MyPack),
 		recvCh:      make(chan *MyPack),
@@ -145,10 +159,107 @@ func Dial(address string) (*Client, error) {
 	return client, nil
 }
 
+func (c *Client) Listen(address string) error {
+	var err error
+	c.listener, err = net.Listen("tcp", address)
+	if err != nil {
+		return err
+	}
+
+	go func() {
+		for {
+			conn, err := c.listener.Accept()
+			if err != nil {
+				log.Println("Accept error:", err)
+				continue
+			}
+
+			go c.handleConnection(conn)
+		}
+	}()
+
+	return nil
+}
+
+// 公共的处理rpc请求
+func (c *Client) handleRequest(req *MyPack, codec Codec) {
+	// 查找处理函数
+	handler, ok := c.handlerMap[req.MethodName]
+	if !ok {
+		log.Println("No handler found for", req.MethodName)
+		// 创建一个错误响应
+		res := &MyPack{
+			ID:     req.ID,
+			Type:   ResponseType,
+			Result: fmt.Sprintf("No handler found for %s", req.MethodName),
+		}
+		// 发送错误响应
+		err := c.send(res)
+		if err != nil {
+			c.errCh <- err
+			return
+		}
+		return
+	}
+
+	// 解析参数数组
+	var args []interface{}
+	err := json.Unmarshal([]byte(req.Args), &args)
+	if err != nil {
+		log.Println("Failed to unmarshal args:", err)
+		return
+	}
+
+	// 反射调用处理函数
+	funcValue := reflect.ValueOf(handler)
+	in := make([]reflect.Value, len(args))
+	for i, arg := range args {
+		in[i] = reflect.ValueOf(arg)
+	}
+	out := funcValue.Call(in)
+
+	// 创建响应对象
+	res := &MyPack{
+		ID:     req.ID,
+		Type:   ResponseType,
+		Result: fmt.Sprintf("%v", out[0].Interface()), // 假设处理函数总是返回一个结果
+	}
+
+	err = c.send(res)
+	if err != nil {
+		c.errCh <- err
+		return
+	}
+}
+
+// 服务端提供给客户的rpc
+func (c *Client) handleConnection(conn net.Conn) {
+	codec := NewTransparentCodec()
+	for {
+		req := &MyPack{}
+		err := c.receive(req)
+		if err != nil {
+			c.errCh <- err
+			return
+		}
+		c.handleRequest(req, codec)
+	}
+}
+
+// 提供给服务端调用
+func (c *Client) HandleServerRequest() {
+	c.pool.Start()
+	go func() {
+		for pack := range c.serverReqCh {
+			c.handleRequest(pack, c.codec)
+		}
+	}()
+}
+
 func (c *Client) sendRequests() {
 	defer close(c.sendCh)
 	for req := range c.sendCh {
-		err := c.codec.Encode(req)
+		err := c.send(req)
 		if err != nil {
 			c.errCh <- err
 			return
@@ -167,7 +278,7 @@ func (c *Client) receiveResponses() {
 	}()
 	for {
 		res := &MyPack{}
-		err := c.codec.Decode(res)
+		err := c.receive(res)
 		if err != nil {
 			c.errCh <- err
 			return
@@ -278,92 +389,6 @@ func (c *Client) Reply(req *MyPack, value string) error {
 	}
 	c.sendCh <- res
 	return nil
-}
-
-func (c *Client) HandleServerRequest() {
-	c.pool.Start()
-	go func() {
-		for pack := range c.serverReqCh {
-			handler, ok := c.handlerMap[pack.MethodName]
-			if !ok {
-				fmt.Printf("No handler found for %s\n", pack.Type)
-				continue
-			}
-
-			c.pool.Submit(func() {
-				defer func() {
-					if r := recover(); r != nil {
-						fmt.Printf("Handler panic: %v\n", r)
-					}
-				}()
-				// 解析参数数组
-				var args []interface{}
-				err := json.Unmarshal([]byte(pack.Args), &args)
-				if err != nil {
-					fmt.Printf("Failed to unmarshal args: %v\n", err)
-					return
-				}
-
-				// 反射创建函数参数
-				funcValue := reflect.ValueOf(handler)
-				funcType := funcValue.Type()
-				numIn := funcType.NumIn()
-
-				// 检查参数数量
-				if len(args) != numIn {
-					fmt.Printf("Wrong number of arguments for %s: expected %d, got %d\n", pack.MethodName, numIn, len(args))
-					return
-				}
-
-				in := make([]reflect.Value, numIn)
-				for i := range in {
-					in[i] = reflect.New(funcType.In(i)).Elem()
-				}
-
-				// 将解析的参数值赋给函数参数
-				for i, arg := range args {
-					argValue := reflect.ValueOf(arg)
-					if argValue.Type() != in[i].Type() {
-						if argValue.Kind() == reflect.Float64 && in[i].Kind() == reflect.Int {
-							// 将 float64 类型转换为 int 类型
-							in[i].SetInt(int64(argValue.Float()))
-						} else {
-							fmt.Printf("Wrong type of argument for %s: expected %s, got %s\n", pack.MethodName, in[i].Type(), argValue.Type())
-							return
-						}
-					} else {
-						in[i].Set(argValue)
-					}
-				}
-
-				// 反射调用处理函数
-				out := funcValue.Call(in)
-
-				// 获取处理函数的返回值
-				var result string
-				var returnErr error
-				if len(out) > 0 {
-					if len(out) == 2 {
-						// 如果有两个返回值，那么第二个应该是 error 类型
-						if err, ok := out[1].Interface().(error); ok {
-							returnErr = err
-						}
-					}
-					result = fmt.Sprintf("%v", out[0].Interface())
-				}
-
-				if returnErr != nil {
-					fmt.Printf("Handler error: %s\n", returnErr)
-					return
-				}
-
-				err = c.Reply(pack, result)
-				if err != nil {
-					fmt.Printf("Reply error: %s\n", err)
-				}
-			})
-		}
-	}()
 }
 
 func (c *Client) RegisterHandler(name string, handler HandlerFunc) {
