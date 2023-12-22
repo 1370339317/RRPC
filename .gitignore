@@ -1,1 +1,2 @@
 src/go/devdemo/__debug_bin*.exe
+src/go/devdemo/rpcwrapper.go

@@ -479,7 +479,7 @@ func GenerateWrappers(doc string) {
 }
 
 func main() {
-	MakeWrapper("rpcprovider.go", "rpcwrapper.go")
+	MakeWrapper("HHServer", "rpcprovider.go", "rpcwrapper.go")
 	client, err := Dial("127.0.0.1:6688")
 	if err != nil {
 		fmt.Println("Error:", err)
