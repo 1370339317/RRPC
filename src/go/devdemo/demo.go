@@ -1,8 +1,12 @@
 package main
 
 import (
+	"bytes"
+	flexpacketprotocol "devdemo/protocol"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"reflect"
@@ -101,18 +105,96 @@ type Client struct {
 	listener    net.Listener // 添加这一行
 }
 
+func (c *Client) writeToConn(data []byte) error {
+
+	protcol := flexpacketprotocol.New(c.conn, []byte("aacc"), []byte("eezz"))
+
+	protcol.Write(data)
+
+	header := make([]byte, 4)
+	binary.BigEndian.PutUint32(header, uint32(len(data)))
+
+	// 计算校验和
+	checksum := calculateChecksum(data)
+
+	// 写入起始标记、长度、数据和校验和
+	_, err := c.conn.Write([]byte("START"))
+	if err != nil {
+		return err
+	}
+	_, err = c.conn.Write(header)
+	if err != nil {
+		return err
+	}
+	_, err = c.conn.Write(data)
+	if err != nil {
+		return err
+	}
+	_, err = c.conn.Write([]byte(checksum))
+	if err != nil {
+		return err
+	}
+	_, err = c.conn.Write([]byte("END"))
+	return err
+}
+
 func (c *Client) readFromConn() ([]byte, error) {
-	data := make([]byte, 1024) // 假设我们一次读取 1024 字节
-	_, err := c.conn.Read(data)
+
+	//protcol := flexpacketprotocol.New(c.conn, 1024, []byte("aacc"), []byte("eezz"))
+
+	//protcol.Read(data)
+
+	// 读取起始标记
+	start := make([]byte, 5)
+	_, err := c.conn.Read(start)
 	if err != nil {
 		return nil, err
 	}
+
+	// 读取长度
+	header := make([]byte, 4)
+	_, err = c.conn.Read(header)
+	if err != nil {
+		return nil, err
+	}
+	length := binary.BigEndian.Uint32(header)
+
+	// 读取数据
+	data := make([]byte, length)
+	_, err = c.conn.Read(data)
+	if err != nil {
+		return nil, err
+	}
+
+	// 读取校验和
+	checksum := make([]byte, 4)
+	_, err = c.conn.Read(checksum)
+	if err != nil {
+		return nil, err
+	}
+
+	// 验证校验和
+	if calculateChecksum(data) != string(checksum) {
+		return nil, fmt.Errorf("checksum error")
+	}
+
+	// 读取结束标记
+	end := make([]byte, 3)
+	_, err = c.conn.Read(end)
+	if err != nil {
+		return nil, err
+	}
+
 	return data, nil
 }
 
-func (c *Client) writeToConn(data []byte) error {
-	_, err := c.conn.Write(data)
-	return err
+// 计算校验和的函数，这里只是一个示例，你可以使用更复杂的算法
+func calculateChecksum(data []byte) string {
+	sum := 0
+	for _, b := range data {
+		sum += int(b)
+	}
+	return fmt.Sprintf("%04d", sum%10000) // 返回四位数的校验和
 }
 
 func (c *Client) send(v interface{}) error {
@@ -120,6 +202,7 @@ func (c *Client) send(v interface{}) error {
 	if err != nil {
 		return err
 	}
+
 	return c.writeToConn(data)
 }
 
@@ -503,7 +586,29 @@ func GenerateWrappers(doc string) {
 	}
 }
 
+func test() {
+	header := []byte("HEADER")
+	footer := []byte("FOOTER")
+
+	// 测试数据
+	// testData := []byte("Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!Hello, world!")
+	testData := []byte("1")
+	buffer := new(bytes.Buffer)
+
+	fpp := flexpacketprotocol.New(buffer, header, footer)
+
+	fpp.Write(testData)
+
+	xxx, err := io.ReadAll(fpp)
+
+	if err != nil {
+		fmt.Print(xxx)
+	}
+
+}
+
 func main() {
+	test()
 	MakeWrapper("HHServer", "rpcprovider.go", "rpcwrapper.go")
 	client, err := Dial("127.0.0.1:6688")
 	if err != nil {
