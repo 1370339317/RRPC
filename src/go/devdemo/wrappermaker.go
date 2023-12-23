@@ -11,9 +11,8 @@ import (
 	"text/template"
 )
 
-// 函数模板
-// 函数模板
-const tmpl = `func (pthis *{{.ClassName}}) {{.Name}}({{range $index, $param := .Params}}{{if $index}}, {{end}}{{$param.Name}} {{$param.Type}}{{end}}) ({{range $index, $ret := .Results}}{{if $index}}, {{end}}{{$ret}}{{end}}, error) {
+const tmpl = `
+func (pthis *{{.ClassName}}) {{.Name}}({{range $index, $param := .Params}}{{if $index}}, {{end}}{{$param.Name}} {{$param.Type}}{{end}}) ({{range $index, $ret := .Results}}{{if $index}}, {{end}}{{$ret}}{{end}}, error) {
     result := pthis.client.Invoke("{{.Name}}", {{range $index, $param := .Params}}{{if $index}}, {{end}}{{$param.Name}}{{end}})
     var err error
     {{if eq (len .Results) 1}} // 如果只有一个返回值
@@ -32,15 +31,13 @@ const tmpl = `func (pthis *{{.ClassName}}) {{.Name}}({{range $index, $param := .
     } else {
         err = json.Unmarshal([]byte(result.Result), &results)
         if err == nil {
-            {{range $index, $ret := .Results}}zero_{{$index}} = convertType(results[{{$index}}], "{{$ret}}")
-            {{end}}
+			{{range $index, $ret := .Results}}zero_{{$index}} = convertToType(results[{{$index}}], "{{$ret}}").({{$ret}})
+			{{end}}
         }
     }
     {{end}}
     return {{range $index, $ret := .Results}}{{if $index}}, {{end}}zero_{{$index}}{{end}}, err
 }
-
-
 `
 
 const predefCode = `
@@ -48,7 +45,6 @@ package main
 
 import (
 	"encoding/json"
-	"strings"
 )
 
 type {{.ClassName}} struct {
@@ -59,29 +55,30 @@ func New{{.ClassName}}(client *Client) *{{.ClassName}} {
 	return &{{.ClassName}}{client: client}
 }
 
-var zeroValues = map[string]interface{}{
-	"string": "",
-	"int":    0,
-	// Add other types as needed
-}
-
-func (pthis *{{.ClassName}}) zeroValue(typeName string) interface{} {
-	typeName = strings.TrimPrefix(typeName, "*")
-	return zeroValues[typeName]
-}
-func convertType(val interface{}, targetType string) interface{} {
-    switch targetType {
-    case "int":
-        if v, ok := val.(float64); ok {
-            return int(v)
-        }
-    case "int64":
-        if v, ok := val.(float64); ok {
-            return int64(v)
-        }
-    // Add other type conversions as needed
-    }
-    return val
+func convertToType(val interface{}, typeName string) interface{} {
+	switch typeName {
+	case "int":
+		if v, ok := val.(float64); ok {
+			return int(v)
+		}
+	case "int64":
+		if v, ok := val.(float64); ok {
+			return int64(v)
+		}
+	case "float64":
+		if v, ok := val.(float64); ok {
+			return v
+		}
+	case "string":
+		if v, ok := val.(string); ok {
+			return v
+		}
+	case "bool":
+		if v, ok := val.(bool); ok {
+			return v
+		}
+	}
+	return nil
 }
 `
 
