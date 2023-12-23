@@ -12,6 +12,7 @@ import (
 )
 
 // 函数模板
+// 函数模板
 const tmpl = `func (pthis *{{.ClassName}}) {{.Name}}({{range $index, $param := .Params}}{{if $index}}, {{end}}{{$param.Name}} {{$param.Type}}{{end}}) ({{range $index, $ret := .Results}}{{if $index}}, {{end}}{{$ret}}{{end}}, error) {
     result := pthis.client.Invoke("{{.Name}}", {{range $index, $param := .Params}}{{if $index}}, {{end}}{{$param.Name}}{{end}})
     var err error
@@ -20,7 +21,7 @@ const tmpl = `func (pthis *{{.ClassName}}) {{.Name}}({{range $index, $param := .
     if result.Err != nil {
         err = result.Err
     } else {
-        err = json.Unmarshal([]byte(result.Result), &zero_0)
+        err = json.Unmarshal([]byte(result.Result), &[]interface{}{&zero_0})
     }
     {{else}} // 如果有多个返回值
     var results []interface{}
@@ -31,13 +32,15 @@ const tmpl = `func (pthis *{{.ClassName}}) {{.Name}}({{range $index, $param := .
     } else {
         err = json.Unmarshal([]byte(result.Result), &results)
         if err == nil {
-            {{range $index, $ret := .Results}}zero_{{$index}} = results[{{$index}}].({{$ret}})
+            {{range $index, $ret := .Results}}zero_{{$index}} = convertType(results[{{$index}}], "{{$ret}}")
             {{end}}
         }
     }
     {{end}}
     return {{range $index, $ret := .Results}}{{if $index}}, {{end}}zero_{{$index}}{{end}}, err
 }
+
+
 `
 
 const predefCode = `
@@ -65,6 +68,20 @@ var zeroValues = map[string]interface{}{
 func (pthis *{{.ClassName}}) zeroValue(typeName string) interface{} {
 	typeName = strings.TrimPrefix(typeName, "*")
 	return zeroValues[typeName]
+}
+func convertType(val interface{}, targetType string) interface{} {
+    switch targetType {
+    case "int":
+        if v, ok := val.(float64); ok {
+            return int(v)
+        }
+    case "int64":
+        if v, ok := val.(float64); ok {
+            return int64(v)
+        }
+    // Add other type conversions as needed
+    }
+    return val
 }
 `
 

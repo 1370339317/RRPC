@@ -305,12 +305,24 @@ func (c *Client) handleRequest(req *MyPack, codec Codec) {
 		// 处理错误
 	}
 
+	// 将处理函数的返回值从反射类型转换回实际的值
+	outInterface := make([]interface{}, len(out))
+	for i, v := range out {
+		outInterface[i] = v.Interface()
+	}
+
+	// 将返回值序列化为JSON字符串
+	outJson, err := json.Marshal(outInterface)
+	if err != nil {
+		// 处理错误
+	}
+
 	// 创建响应对象
 	res := &MyPack{
 		ID:     req.ID,
 		Type:   ResponseType,
-		Args:   string(argsJson),                      // 添加参数
-		Result: fmt.Sprintf("%v", out[0].Interface()), // 假设处理函数总是返回一个结果
+		Args:   string(argsJson), // 添加参数
+		Result: string(outJson),  // 使用序列化后的返回值
 	}
 
 	err = c.send(res)
@@ -608,7 +620,8 @@ func main() {
 		fmt.Printf("使用桩回调客户端rpc过程Add2\r\n")
 		ret1, ret2, err := remotestub.Add2(1, 2)
 		if err != nil {
-			return err
+			fmt.Printf("发生错误\r\n")
+			return nil
 		}
 		fmt.Printf("ret1,2:%d %d", ret1, ret2)
 
@@ -630,7 +643,7 @@ func main() {
 
 	client.HandleServerRequest() // 启动处理服务端请求的goroutine
 
-	for i := 0; i < 6; i++ {
+	for i := 0; i < 16666; i++ {
 
 		remotestub := Lpcstub{
 			client: client,
@@ -641,7 +654,7 @@ func main() {
 			return
 		}
 		fmt.Printf("ret:%d\r\n", ret1)
-		time.Sleep(66666)
+		//time.Sleep(66666)
 	}
 
 	//GenerateWrappers(client.GenerateDocs())
