@@ -272,8 +272,8 @@ func (c *Client) handleRequest(req *MyPack, codec Codec) {
 	}
 
 	// 解析参数数组
-	var args []interface{}
-	err := json.Unmarshal([]byte(req.Args), &args)
+	var rawArgs []interface{}
+	err := json.Unmarshal([]byte(req.Args), &rawArgs)
 	if err != nil {
 		log.Println("Failed to unmarshal args:", err)
 		return
@@ -282,15 +282,127 @@ func (c *Client) handleRequest(req *MyPack, codec Codec) {
 	// 反射调用处理函数
 	funcValue := reflect.ValueOf(handler)
 	funcType := funcValue.Type()
-	in := make([]reflect.Value, len(args))
-	for i, arg := range args {
+
+	// Prepare the arguments for the function call
+	in := make([]reflect.Value, funcType.NumIn()) // Use the number of parameters of the function
+
+	// Convert raw arguments to the correct type
+	for i := 0; i < funcType.NumIn(); i++ {
 		argType := funcType.In(i)
-		// 如果参数是float64类型，但是处理函数的参数是int类型，那么将参数转换为int
-		if num, ok := arg.(float64); ok && argType.Kind() == reflect.Int {
-			arg = int(num)
+		rawArg := rawArgs[i]
+
+		// If the argument is a slice of int
+		if argType.Kind() == reflect.Slice && argType.Elem().Kind() == reflect.Int {
+			rawSlice, ok := rawArg.([]interface{})
+			if !ok {
+				log.Println("Failed to convert argument to []interface{}:", rawArg)
+				return
+			}
+
+			intSlice := make([]int, len(rawSlice))
+			for i, v := range rawSlice {
+				num, ok := v.(float64) // json.Unmarshal converts numbers to float64
+				if !ok {
+					log.Println("Failed to convert argument to int:", v)
+					return
+				}
+				intSlice[i] = int(num)
+			}
+
+			in[i] = reflect.ValueOf(intSlice)
+		} else if argType.Kind() == reflect.Int {
+			num, ok := rawArg.(float64) // json.Unmarshal converts numbers to float64
+			if !ok {
+				log.Println("Failed to convert argument to int:", rawArg)
+				return
+			}
+
+			in[i] = reflect.ValueOf(int(num))
+		} else if argType.Kind() == reflect.Float64 { // Handle float64 type
+			num, ok := rawArg.(float64)
+			if !ok {
+				log.Println("Failed to convert argument to float64:", rawArg)
+				return
+			}
+
+			in[i] = reflect.ValueOf(num)
+		} else if argType.Kind() == reflect.String { // Handle string type
+			str, ok := rawArg.(string)
+			if !ok {
+				log.Println("Failed to convert argument to string:", rawArg)
+				return
+			}
+
+			in[i] = reflect.ValueOf(str)
+		} else if argType.Kind() == reflect.Bool { // Handle bool type
+			b, ok := rawArg.(bool)
+			if !ok {
+				log.Println("Failed to convert argument to bool:", rawArg)
+				return
+			}
+
+			in[i] = reflect.ValueOf(b)
+		} else if argType.Kind() == reflect.Ptr && argType.Elem().Kind() == reflect.String { // Handle *string type
+			str, ok := rawArg.(string)
+			if !ok {
+				log.Println("Failed to convert argument to string:", rawArg)
+				return
+			}
+
+			in[i] = reflect.ValueOf(&str)
+		} else // Handle CustomType
+		if argType.Kind() == reflect.Struct {
+			rawMap, ok := rawArg.(map[string]interface{})
+			if !ok {
+				log.Println("Failed to convert argument to map[string]interface{}:", rawArg)
+				return
+			}
+
+			// Create a new instance of the struct
+			strctPtr := reflect.New(argType)
+			strct := strctPtr.Elem()
+
+			// Iterate over all fields of the struct
+			for i := 0; i < strct.NumField(); i++ {
+				field := strct.Field(i)
+				fieldType := strct.Type().Field(i)
+
+				// Get the value from the map
+				rawValue, ok := rawMap[fieldType.Name]
+				if !ok {
+					log.Println("Missing field in map:", fieldType.Name)
+					return
+				}
+
+				// Convert the raw value to the correct type and set the field
+				switch field.Kind() {
+				case reflect.Int:
+					value, ok := rawValue.(float64)
+					if !ok {
+						log.Println("Failed to convert value to float64:", rawValue)
+						return
+					}
+					field.SetInt(int64(value))
+				case reflect.String:
+					value, ok := rawValue.(string)
+					if !ok {
+						log.Println("Failed to convert value to string:", rawValue)
+						return
+					}
+					field.SetString(value)
+				// Add more cases here for other types
+				default:
+					log.Println("Unsupported field type:", field.Kind())
+					return
+				}
+			}
+
+			in[i] = strct
+		} else {
+			// Handle other types...
 		}
-		in[i] = reflect.ValueOf(arg)
 	}
+
 	out := funcValue.Call(in)
 
 	// 将处理函数的参数从反射类型转换回实际的值
@@ -611,7 +723,7 @@ func main() {
 		c.RegisterHandler("ToUpper", ToUpper)
 		c.RegisterHandler("Add", Add)
 		c.RegisterHandler("Add2", Add2)
-
+		c.RegisterHandler("TestRPCFunc", TestRPCFunc)
 		remotestub := Lpcstub{
 			client: c,
 		}
@@ -640,6 +752,7 @@ func main() {
 	client.RegisterHandler("ToUpper", ToUpper)
 	client.RegisterHandler("Add", Add)
 	client.RegisterHandler("Add2", Add2)
+	client.RegisterHandler("TestRPCFunc", TestRPCFunc)
 
 	client.HandleServerRequest() // 启动处理服务端请求的goroutine
 
@@ -654,6 +767,30 @@ func main() {
 			return
 		}
 		fmt.Printf("ret:%d\r\n", ret1)
+
+		arg1 := 10
+		arg2 := 20.0
+		arg3 := "hello"
+		arg4 := true
+		arg5 := []int{1, 2, 3}
+		arg6 := "world"
+		arg7 := CustomType{
+			Field1: 100,
+			Field2: "foo",
+		}
+
+		res1, res2, res3, res4, res5, res6, res7, err, err2 := remotestub.TestRPCFunc(arg1, arg2, arg3, arg4, arg5, &arg6, arg7)
+
+		if err2 != nil {
+			return
+		}
+		if err != nil {
+			fmt.Println("Error:", err)
+			return
+		}
+
+		fmt.Println("Result:", res1, *res2, res3, res4, res5, *res6, res7)
+
 		//time.Sleep(66666)
 	}
 
