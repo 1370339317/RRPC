@@ -3,6 +3,7 @@ package main
 import (
 	flexpacketprotocol "devdemo/protocol"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -72,8 +73,9 @@ type MyPack struct {
 	ID         uint64
 	Type       string // 报文类型：Request, Response, ServerRequest
 	MethodName string // 函数名
-	Args       string // 请求参数
-	Result     string // 响应结果
+	Args       []byte // 请求参数
+	Result     []byte // 响应结果
+	Error      string // 错误信息
 }
 
 const (
@@ -82,7 +84,7 @@ const (
 )
 
 type InvokeResult struct {
-	Result string
+	Result []byte
 	Err    error
 }
 
@@ -125,7 +127,7 @@ func (c *Client) readFromConn() ([]byte, error) {
 	}
 }
 
-func (c *Client) send(v interface{}) error {
+func (c *Client) send(v *MyPack) error {
 	data, err := c.codec.Encode(v)
 	if err != nil {
 		return err
@@ -134,7 +136,7 @@ func (c *Client) send(v interface{}) error {
 	return c.writeToConn(data)
 }
 
-func (c *Client) receive(v interface{}) error {
+func (c *Client) receive(v *MyPack) error {
 	data, err := c.readFromConn()
 	if err != nil {
 		return err
@@ -258,9 +260,9 @@ func (c *Client) handleRequest(req *MyPack, codec Codec) {
 		log.Println("No handler found for", req.MethodName)
 		// 创建一个错误响应
 		res := &MyPack{
-			ID:     req.ID,
-			Type:   ResponseType,
-			Result: fmt.Sprintf("No handler found for %s", req.MethodName),
+			ID:    req.ID,
+			Type:  ResponseType,
+			Error: fmt.Sprintf("No handler found for %s", req.MethodName),
 		}
 		// 发送错误响应
 		err := c.send(res)
@@ -433,8 +435,8 @@ func (c *Client) handleRequest(req *MyPack, codec Codec) {
 	res := &MyPack{
 		ID:     req.ID,
 		Type:   ResponseType,
-		Args:   string(argsJson), // 添加参数
-		Result: string(outJson),  // 使用序列化后的返回值
+		Args:   argsJson, // 添加参数
+		Result: outJson,  // 使用序列化后的返回值
 	}
 
 	err = c.send(res)
@@ -561,7 +563,7 @@ func (c *Client) Invoke(method string, args ...interface{}) *InvokeResult {
 	req := &MyPack{
 		Type:       RequestType,
 		MethodName: method,
-		Args:       string(value),
+		Args:       value,
 	}
 
 	// 发送请求并获取响应
@@ -569,7 +571,11 @@ func (c *Client) Invoke(method string, args ...interface{}) *InvokeResult {
 	if err != nil {
 		return &InvokeResult{Err: err}
 	}
-
+	// 检查响应中的错误字段
+	if res.Error != "" {
+		// 如果有错误，创建一个包含错误信息的InvokeResult并返回
+		return &InvokeResult{Err: errors.New(res.Error)}
+	}
 	// 反序列化参数的引用
 	var result []interface{}
 	err = json.Unmarshal([]byte(res.Args), &result)
@@ -599,7 +605,7 @@ func (c *Client) Reply(req *MyPack, value string) error {
 	res := &MyPack{
 		ID:     req.ID, // 使用原来请求的ID
 		Type:   ResponseType,
-		Result: value,
+		Result: []byte(value),
 	}
 	c.sendCh <- res
 	return nil
