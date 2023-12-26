@@ -29,21 +29,21 @@ type CustomType struct {
 	Field2 string
 }
 
-func TestRPCFunc(arg1 int, arg2 float64, arg3 string, arg4 bool, arg5 []int, arg6 *string, arg7 CustomType) (int, *float64, string, bool, []int, *string, CustomType, error) {
+func TestRPCFunc(arg1 int, arg2 float64, arg3 string, arg4 bool, arg5 []int, arg6 *string, arg7 CustomType, arg8 *CustomType) (int, *float64, string, bool, []int, *string, CustomType, *CustomType, error) {
 	if arg1 < 0 {
-		return 0, nil, "", false, nil, nil, CustomType{}, errors.New("arg1 cannot be negative")
+		return 0, nil, "", false, nil, nil, CustomType{}, &CustomType{}, errors.New("arg1 cannot be negative")
 	}
 	if arg2 < 0 {
-		return 0, nil, "", false, nil, nil, CustomType{}, errors.New("arg2 cannot be negative")
+		return 0, nil, "", false, nil, nil, CustomType{}, &CustomType{}, errors.New("arg2 cannot be negative")
 	}
 	if arg3 == "" {
-		return 0, nil, "", false, nil, nil, CustomType{}, errors.New("arg3 cannot be empty")
+		return 0, nil, "", false, nil, nil, CustomType{}, &CustomType{}, errors.New("arg3 cannot be empty")
 	}
 	if len(arg5) == 0 {
-		return 0, nil, "", false, nil, nil, CustomType{}, errors.New("arg5 cannot be empty")
+		return 0, nil, "", false, nil, nil, CustomType{}, &CustomType{}, errors.New("arg5 cannot be empty")
 	}
 	if arg6 == nil {
-		return 0, nil, "", false, nil, nil, CustomType{}, errors.New("arg6 cannot be nil")
+		return 0, nil, "", false, nil, nil, CustomType{}, &CustomType{}, errors.New("arg6 cannot be nil")
 	}
 
 	res1 := arg1 * 2
@@ -51,11 +51,21 @@ func TestRPCFunc(arg1 int, arg2 float64, arg3 string, arg4 bool, arg5 []int, arg
 	res3 := arg3 + arg3
 	res4 := !arg4
 	res5 := append(arg5, arg5...)
+	arg5[0] = 1111
 	res6 := *arg6 + *arg6
+	*arg6 = res6 + *arg6
 	res7 := CustomType{
 		Field1: arg7.Field1 * 2,
 		Field2: arg7.Field2 + arg7.Field2,
 	}
+	res8 := CustomType{
+		Field1: arg8.Field1 * 2,
+		Field2: arg8.Field2 + arg8.Field2,
+	}
+	*arg8 = CustomType{
+		Field1: arg8.Field1 * 5,
+		Field2: arg8.Field2 + arg7.Field2 + arg7.Field2,
+	}
 
-	return res1, &res2, res3, res4, res5, &res6, res7, nil
+	return res1, &res2, res3, res4, res5, &res6, res7, &res8, nil
 }

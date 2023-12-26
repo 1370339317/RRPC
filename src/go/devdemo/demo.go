@@ -14,9 +14,121 @@ import (
 	"time"
 )
 
+// -数据转换与容错--------------------------------------------------------------------------------------------------------------
+
+func (tc *Client) TypeNameToType(typeName string) reflect.Type {
+	switch typeName {
+	case "int":
+		return reflect.TypeOf(int(0))
+	case "int64":
+		return reflect.TypeOf(int64(0))
+	case "float64":
+		return reflect.TypeOf(float64(0))
+	case "string":
+		return reflect.TypeOf("")
+	case "bool":
+		return reflect.TypeOf(true)
+	case "*float64":
+		var p *float64
+		return reflect.TypeOf(p)
+	case "*string":
+		var p *string
+		return reflect.TypeOf(p)
+	case "[]int":
+		return reflect.TypeOf([]int{})
+	case "error":
+		return reflect.TypeOf(errors.New(""))
+	default:
+		panic("unsupported type: " + typeName)
+	}
+}
+
+func convertBasicType(val interface{}, targetType reflect.Type) interface{} {
+	switch targetType.Kind() {
+	case reflect.Int:
+		if v, ok := val.(float64); ok {
+			return int(v)
+		}
+	case reflect.Int64:
+		if v, ok := val.(float64); ok {
+			return int64(v)
+		}
+	case reflect.Float64:
+		if v, ok := val.(float64); ok {
+			return v
+		}
+	case reflect.String:
+		if v, ok := val.(string); ok {
+			return v
+		}
+	case reflect.Bool:
+		if v, ok := val.(bool); ok {
+			return v
+		}
+	default:
+		panic("unsupported type: " + targetType.String())
+	}
+	return nil
+}
+
+func (tc *Client) ConvertToType(val interface{}, targetType reflect.Type) interface{} {
+	if val == nil {
+		return nil
+	}
+	switch targetType.Kind() {
+	case reflect.Ptr: // Handle pointers
+		elemVal := tc.ConvertToType(val, targetType.Elem())
+		ptr := reflect.New(targetType.Elem())
+		ptr.Elem().Set(reflect.ValueOf(elemVal))
+		return ptr.Interface()
+	case reflect.Slice: // Handle slices
+		if v, ok := val.([]interface{}); ok {
+			slice := reflect.MakeSlice(targetType, len(v), len(v))
+			for i, elem := range v {
+				slice.Index(i).Set(reflect.ValueOf(tc.ConvertToType(elem, targetType.Elem())))
+			}
+			return slice.Interface()
+		}
+	case reflect.Map: // Handle maps
+		if v, ok := val.(map[string]interface{}); ok {
+			m := reflect.MakeMap(targetType)
+			for k, elem := range v {
+				m.SetMapIndex(reflect.ValueOf(k), reflect.ValueOf(tc.ConvertToType(elem, targetType.Elem())))
+			}
+			return m.Interface()
+		}
+	case reflect.Struct:
+		// Convert map[string]interface{} to JSON
+		jsonData, err := tc.codec.Marshal(val)
+		if err != nil {
+			panic(err)
+		}
+
+		// Unmarshal JSON to the target type
+		targetVal := reflect.New(targetType).Interface()
+		err = tc.codec.Unmarshal(jsonData, targetVal)
+		if err != nil {
+			panic(err)
+		}
+
+		return reflect.ValueOf(targetVal).Elem().Interface()
+	case reflect.Interface: // Handle error interface
+		if targetType.Name() == "error" {
+			if v, ok := val.(string); ok {
+				return errors.New(v)
+			}
+		}
+	default: // Handle basic types
+		return convertBasicType(val, targetType)
+	}
+	return nil
+}
+
+//-数据转换与容错--------------------------------------------------------------------------------------------------------------
+
 type Codec interface {
-	Encode(interface{}) ([]byte, error)
-	Decode([]byte, interface{}) error
+	Marshal(interface{}) ([]byte, error)
+	Unmarshal([]byte, interface{}) error
 }
 
 type TransparentCodec struct{}
@@ -26,7 +138,7 @@ func NewTransparentCodec() *TransparentCodec {
 }
 
 // Encode 方法返回序列化后的数据，而不是直接写入 conn
-func (c *TransparentCodec) Encode(v interface{}) ([]byte, error) {
+func (c *TransparentCodec) Marshal(v interface{}) ([]byte, error) {
 	data, err := json.Marshal(v)
 	if err != nil {
 		return nil, fmt.Errorf("TransparentCodec: unsupported data type %T", v)
@@ -35,7 +147,7 @@ func (c *TransparentCodec) Encode(v interface{}) ([]byte, error) {
 }
 
 // Decode 方法从数据中反序列化，而不是直接从 conn 读取
-func (c *TransparentCodec) Decode(data []byte, v interface{}) error {
+func (c *TransparentCodec) Unmarshal(data []byte, v interface{}) error {
 	err := json.Unmarshal(data, v)
 	if err != nil {
 		return fmt.Errorf("TransparentCodec: failed to unmarshal data: %v", err)
@@ -101,7 +213,6 @@ type Client struct {
 	resChs      sync.Map
 	handlerMap  map[string]HandlerFunc
 	pool        *WorkerPool
-
 	frameReader io.Reader
 	frameWriter io.Writer
 }
@@ -128,7 +239,7 @@ func (c *Client) readFromConn() ([]byte, error) {
 }
 
 func (c *Client) send(v *MyPack) error {
-	data, err := c.codec.Encode(v)
+	data, err := c.codec.Marshal(v)
 	if err != nil {
 		return err
 	}
@@ -141,7 +252,7 @@ func (c *Client) receive(v *MyPack) error {
 	if err != nil {
 		return err
 	}
-	return c.codec.Decode(data, v)
+	return c.codec.Unmarshal(data, v)
 }
 
 func Dial(address string) (*Client, error) {
@@ -275,7 +386,7 @@ func (c *Client) handleRequest(req *MyPack, codec Codec) {
 
 	// 解析参数数组
 	var rawArgs []interface{}
-	err := json.Unmarshal([]byte(req.Args), &rawArgs)
+	err := codec.Unmarshal([]byte(req.Args), &rawArgs)
 	if err != nil {
 		log.Println("Failed to unmarshal args:", err)
 		return
@@ -303,7 +414,7 @@ func (c *Client) handleRequest(req *MyPack, codec Codec) {
 
 			intSlice := make([]int, len(rawSlice))
 			for i, v := range rawSlice {
-				num, ok := v.(float64) // json.Unmarshal converts numbers to float64
+				num, ok := v.(float64)
 				if !ok {
 					log.Println("Failed to convert argument to int:", v)
 					return
@@ -313,7 +424,7 @@ func (c *Client) handleRequest(req *MyPack, codec Codec) {
 
 			in[i] = reflect.ValueOf(intSlice)
 		} else if argType.Kind() == reflect.Int {
-			num, ok := rawArg.(float64) // json.Unmarshal converts numbers to float64
+			num, ok := rawArg.(float64)
 			if !ok {
 				log.Println("Failed to convert argument to int:", rawArg)
 				return
@@ -400,63 +511,109 @@ func (c *Client) handleRequest(req *MyPack, codec Codec) {
 			}
 
 			in[i] = strct
+		} else if argType.Kind() == reflect.Ptr && argType.Elem().Kind() == reflect.Struct {
+			rawMap, ok := rawArg.(map[string]interface{})
+			if !ok {
+				log.Println("Failed to convert argument to map[string]interface{}:", rawArg)
+				return
+			}
+
+			// Create a new instance of the struct
+			strctPtr := reflect.New(argType.Elem())
+			strct := strctPtr.Elem()
+
+			// Iterate over all fields of the struct
+			for i := 0; i < strct.NumField(); i++ {
+				field := strct.Field(i)
+				fieldType := strct.Type().Field(i)
+
+				// Get the value from the map
+				rawValue, ok := rawMap[fieldType.Name]
+				if !ok {
+					log.Println("Missing field in map:", fieldType.Name)
+					return
+				}
+
+				// Convert the raw value to the correct type and set the field
+				switch field.Kind() {
+				case reflect.Int:
+					value, ok := rawValue.(float64)
+					if !ok {
+						log.Println("Failed to convert value to float64:", rawValue)
+						return
+					}
+					field.SetInt(int64(value))
+				case reflect.String:
+					value, ok := rawValue.(string)
+					if !ok {
+						log.Println("Failed to convert value to string:", rawValue)
+						return
+					}
+					field.SetString(value)
+				// Add more cases here for other types
+				default:
+					log.Println("Unsupported field type:", field.Kind())
+					return
+				}
+			}
+
+			in[i] = strctPtr
 		} else {
 			// Handle other types...
+			err = fmt.Errorf("unknown arg type Unmarshel: %d", argType.Kind())
+
 		}
-	}
-
-	out := funcValue.Call(in)
-
-	// 将处理函数的参数从反射类型转换回实际的值
-	argsInterface := make([]interface{}, len(in))
-	for i, v := range in {
-		argsInterface[i] = v.Interface()
-	}
-
-	// 将参数序列化为JSON字符串
-	argsJson, err := json.Marshal(argsInterface)
-	if err != nil {
-		// 处理错误
-	}
-
-	// 将处理函数的返回值从反射类型转换回实际的值
-	outInterface := make([]interface{}, len(out))
-	for i, v := range out {
-		outInterface[i] = v.Interface()
-	}
-
-	// 将返回值序列化为JSON字符串
-	outJson, err := json.Marshal(outInterface)
-	if err != nil {
-		// 处理错误
 	}
 
 	// 创建响应对象
 	res := &MyPack{
-		ID:     req.ID,
-		Type:   ResponseType,
-		Args:   argsJson, // 添加参数
-		Result: outJson,  // 使用序列化后的返回值
+		ID:   req.ID,
+		Type: ResponseType,
 	}
+	//无错误才走
+	if err == nil {
+		out := funcValue.Call(in)
 
+		// 将处理函数的参数从反射类型转换回实际的值
+		argsInterface := make([]interface{}, len(in))
+		for i, v := range in {
+			argsInterface[i] = v.Interface()
+		}
+
+		// 将参数序列化为JSON字符串
+		argsJson, err := codec.Marshal(argsInterface)
+		if err == nil {
+
+			res.Args = argsJson
+
+			// 将处理函数的返回值从反射类型转换回实际的值
+			outInterface := make([]interface{}, len(out))
+			for i, v := range out {
+				outInterface[i] = v.Interface()
+			}
+
+			// 将返回值序列化为JSON字符串
+			outJson, err := codec.Marshal(outInterface)
+			if err == nil {
+				res.Result = outJson
+			} else {
+				// 处理错误
+				res.Error = fmt.Sprintf("outInterface Marshal fail: %s", err.Error())
+			}
+
+		} else {
+			// 处理错误
+			res.Error = fmt.Sprintf("argsInterface Marshal fail: %s", err.Error())
+		}
+
+	} else {
+		// 处理错误
+		res.Error = fmt.Sprintf("argsin UnMarshal fail: %s", err.Error())
+	}
 	err = c.send(res)
 	if err != nil {
 		c.errCh <- err
 		return
-	}
-}
-
-// 服务端提供给客户的rpc
-func (c *Client) handleConnection(conn net.Conn) {
-	codec := NewTransparentCodec()
-	for {
-		req := &MyPack{}
-		err := c.receive(req)
-		if err != nil {
-			c.errCh <- err
-			return
-		}
-		c.handleRequest(req, codec)
 	}
 }
 
@@ -533,28 +690,20 @@ func (c *Client) Call(req *MyPack) (*MyPack, error) {
 	}
 }
 
-func setArgValue(v reflect.Value, result interface{}) error {
+func (c *Client) setArgValue(v reflect.Value, result interface{}) error {
 	if v.Kind() == reflect.Ptr {
-		switch v.Elem().Kind() {
-		case reflect.Int:
-			v.Elem().SetInt(int64(result.(float64)))
-		case reflect.Float64:
-			v.Elem().SetFloat(result.(float64))
-		case reflect.String:
-			v.Elem().SetString(result.(string))
-		case reflect.Bool:
-			v.Elem().SetBool(result.(bool))
-		// ... 其他类型
-		default:
-			return fmt.Errorf("unsupported type: %s", v.Elem().Type())
-		}
+		converted := c.ConvertToType(result, v.Elem().Type())
+		v.Elem().Set(reflect.ValueOf(converted))
+	} else if v.Kind() == reflect.Slice {
+		converted := c.ConvertToType(result, v.Type())
+		reflect.Copy(v, reflect.ValueOf(converted))
 	}
 	return nil
 }
 
 func (c *Client) Invoke(method string, args ...interface{}) *InvokeResult {
 	// 将参数序列化为JSON字符串
-	value, err := json.Marshal(args)
+	value, err := c.codec.Marshal(args)
 	if err != nil {
 		return &InvokeResult{Err: fmt.Errorf("failed to marshal args: %v", err)}
 	}
@@ -578,7 +727,7 @@ func (c *Client) Invoke(method string, args ...interface{}) *InvokeResult {
 	}
 	// 反序列化参数的引用
 	var result []interface{}
-	err = json.Unmarshal([]byte(res.Args), &result)
+	err = c.codec.Unmarshal([]byte(res.Args), &result)
 	if err != nil {
 		return &InvokeResult{Err: fmt.Errorf("failed to unmarshal result: %v", err)}
 	}
@@ -591,7 +740,7 @@ func (c *Client) Invoke(method string, args ...interface{}) *InvokeResult {
 
 	// 更新指针参数的值
 	for i, arg := range args {
-		err := setArgValue(reflect.ValueOf(arg), result[i])
+		err := c.setArgValue(reflect.ValueOf(arg), result[i])
 		if err != nil {
 			invokeResult.Err = err
 			break
@@ -620,109 +769,6 @@ func (c *Client) RegisterHandler(name string, handler HandlerFunc) {
 	c.handlerMap[name] = handler
 }
 
-func (c *Client) GenerateDocs() string {
-	var docs []map[string]interface{}
-
-	for name, handler := range c.handlerMap {
-		handlerType := reflect.TypeOf(handler)
-		var params []string
-		var returns []string
-
-		for i := 0; i < handlerType.NumIn(); i++ {
-			params = append(params, handlerType.In(i).String())
-		}
-
-		for i := 0; i < handlerType.NumOut(); i++ {
-			returns = append(returns, handlerType.Out(i).String())
-		}
-
-		doc := map[string]interface{}{
-			"function":   name,
-			"parameters": params,
-			"returns":    returns,
-		}
-
-		docs = append(docs, doc)
-	}
-
-	jsonDocs, err := json.MarshalIndent(docs, "", "  ")
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	fmt.Println(string(jsonDocs))
-	return string(jsonDocs)
-}
-
-func GenerateWrappers(doc string) {
-	var funcs []struct {
-		Function   string   `json:"function"`
-		Parameters []string `json:"parameters"`
-		Returns    []string `json:"returns"`
-	}
-
-	err := json.Unmarshal([]byte(doc), &funcs)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	fmt.Println("type MyServiceClient struct {")
-	fmt.Println("\tclient *Client")
-	fmt.Println("}")
-
-	for _, f := range funcs {
-		fmt.Printf("\nfunc (s *MyServiceClient) %s(", f.Function)
-		for i, p := range f.Parameters {
-			if i > 0 {
-				fmt.Print(", ")
-			}
-			fmt.Printf("arg%d %s", i, p)
-		}
-		fmt.Print(") (")
-		for i, r := range f.Returns {
-			if i > 0 {
-				fmt.Print(", ")
-			}
-			if r == "error" {
-				fmt.Print("error")
-			} else {
-				fmt.Printf("ret%d %s", i, r)
-			}
-		}
-		fmt.Println(") {")
-		fmt.Printf("\tresult := s.client.Invoke(\"%s\"", f.Function)
-		for i := range f.Parameters {
-			fmt.Printf(", arg%d", i)
-		}
-		fmt.Println(")")
-		fmt.Println("\tif result.Err != nil {")
-		fmt.Print("\t\treturn ")
-		for i, r := range f.Returns {
-			if i > 0 {
-				fmt.Print(", ")
-			}
-			if r == "error" {
-				fmt.Print("result.Err")
-			} else {
-				fmt.Print("nil")
-			}
-		}
-		fmt.Println("\n\t}")
-		fmt.Print("\treturn ")
-		for i, r := range f.Returns {
-			if i > 0 {
-				fmt.Print(", ")
-			}
-			if r == "error" {
-				fmt.Print("nil")
-			} else {
-				fmt.Printf("strconv.Atoi(result.Result)")
-			}
-		}
-		fmt.Println("\n}")
-	}
-}
-
 func main() {
 
 	_, err := NewServer("127.0.0.1:6688", func(c *Client) error {
@@ -730,7 +776,7 @@ func main() {
 		c.RegisterHandler("Add", Add)
 		c.RegisterHandler("Add2", Add2)
 		c.RegisterHandler("TestRPCFunc", TestRPCFunc)
-		remotestub := Lpcstub{
+		remotestub := Lpcstub1{
 			client: c,
 		}
 
@@ -764,7 +810,7 @@ func main() {
 
 	for i := 0; i < 16666; i++ {
 
-		remotestub := Lpcstub{
+		remotestub := Lpcstub1{
 			client: client,
 		}
 
@@ -774,28 +820,32 @@ func main() {
 		}
 		fmt.Printf("ret:%d\r\n", ret1)
 
-		arg1 := 10
-		arg2 := 20.0
-		arg3 := "hello"
-		arg4 := true
-		arg5 := []int{1, 2, 3}
-		arg6 := "world"
-		arg7 := CustomType{
-			Field1: 100,
-			Field2: "foo",
-		}
+		// arg1 := 10
+		// arg2 := 20.0
+		// arg3 := "hello"
+		// arg4 := true
+		// arg5 := []int{1, 2, 3}
+		// arg6 := "world"
+		// arg7 := CustomType{
+		// 	Field1: 100,
+		// 	Field2: "foo",
+		// }
+		// arg8 := CustomType{
+		// 	Field1: 666,
+		// 	Field2: "dqq",
+		// }
 
-		res1, res2, res3, res4, res5, res6, res7, err, err2 := remotestub.TestRPCFunc(arg1, arg2, arg3, arg4, arg5, &arg6, arg7)
+		// res1, res2, res3, res4, res5, res6, res7, res8, err, err2 := remotestub.TestRPCFunc(arg1, arg2, arg3, arg4, arg5, &arg6, arg7, &arg8)
 
-		if err2 != nil {
-			return
-		}
-		if err != nil {
-			fmt.Println("Error:", err)
-			return
-		}
+		// if err2 != nil {
+		// 	return
+		// }
+		// if err != nil {
+		// 	fmt.Println("Error:", err)
+		// 	return
+		// }
 
-		fmt.Println("Result:", res1, *res2, res3, res4, res5, *res6, res7)
+		// fmt.Println("Result:", res1, *res2, res3, res4, res5, *res6, res7, res8)
 
 		//time.Sleep(66666)
 	}

@@ -5,6 +5,6 @@ import (
 )
 
 func TestMaker(t *testing.T) {
-	MakeWrapper("Lpcstub", "rpcprovider.go", "rpcwrapper.go")
+	MakeWrapper("Lpcstub1", "rpcprovider.go", "rpcwrapper.go")
 
 }

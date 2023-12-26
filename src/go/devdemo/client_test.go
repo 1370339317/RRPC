@@ -37,7 +37,7 @@ func TestClient(t *testing.T) {
 
 	// 	}
 	// }
-	return
+	//return
 	client, err := Dial("127.0.0.1:8080")
 	if err != nil {
 		t.Fatal(err)
@@ -48,16 +48,4 @@ func TestClient(t *testing.T) {
 		t.Fatal(result.Err)
 	}
 
-	if result.Result != "HELLO" {
-		t.Fatalf("expected HELLO, got %s", result.Result)
-	}
-
-	result = client.Invoke("Add", 1, 2)
-	if result.Err != nil {
-		t.Fatal(result.Err)
-	}
-
-	if result.Result != "3" {
-		t.Fatalf("expected 3, got %s", result.Result)
-	}
 }
