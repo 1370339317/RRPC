@@ -820,32 +820,32 @@ func main() {
 		}
 		fmt.Printf("ret:%d\r\n", ret1)
 
-		// arg1 := 10
-		// arg2 := 20.0
-		// arg3 := "hello"
-		// arg4 := true
-		// arg5 := []int{1, 2, 3}
-		// arg6 := "world"
-		// arg7 := CustomType{
-		// 	Field1: 100,
-		// 	Field2: "foo",
-		// }
-		// arg8 := CustomType{
-		// 	Field1: 666,
-		// 	Field2: "dqq",
-		// }
+		arg1 := 10
+		arg2 := 20.0
+		arg3 := "hello"
+		arg4 := true
+		arg5 := []int{1, 2, 3}
+		arg6 := "world"
+		arg7 := CustomType{
+			Field1: 100,
+			Field2: "foo",
+		}
+		arg8 := CustomType{
+			Field1: 666,
+			Field2: "dqq",
+		}
 
-		// res1, res2, res3, res4, res5, res6, res7, res8, err, err2 := remotestub.TestRPCFunc(arg1, arg2, arg3, arg4, arg5, &arg6, arg7, &arg8)
+		res1, res2, res3, res4, res5, res6, res7, res8, err, err2 := remotestub.TestRPCFunc(arg1, arg2, arg3, arg4, arg5, &arg6, arg7, &arg8)
 
-		// if err2 != nil {
-		// 	return
-		// }
-		// if err != nil {
-		// 	fmt.Println("Error:", err)
-		// 	return
-		// }
+		if err2 != nil {
+			return
+		}
+		if err != nil {
+			fmt.Println("Error:", err)
+			return
+		}
 
-		// fmt.Println("Result:", res1, *res2, res3, res4, res5, *res6, res7, res8)
+		fmt.Println("Result:", res1, *res2, res3, res4, res5, *res6, res7, res8)
 
 		//time.Sleep(66666)
 	}

@@ -12,26 +12,28 @@ import (
 )
 
 const tmpl = `
-func (pthis *{{.ClassName}}) {{.Name}}({{range $index, $param := .Params}}{{if $index}}, {{end}}{{$param.Name}} {{$param.Type}}{{end}}) ({{range $index, $ret := .Results}}{{if $index}}, {{end}}{{$ret}}{{end}}, error) {
+func (pthis *{{.ClassName}}) {{.Name}}({{range $index, $param := .Params}}{{if $index}}, {{end}}{{$param.Name}} {{$param.Type}}{{end}}) ({{range $index, $ret := .Results}}{{if $index}}, {{end}}{{if $ret.IsStructPtr}}*{{end}}{{if $ret.IsStruct}}{{$ret.StructName}}{{else}}{{$ret.Type}}{{end}}{{end}}, error) {
     result := pthis.client.Invoke("{{.Name}}", {{range $index, $param := .Params}}{{if $index}}, {{end}}{{$param.Name}}{{end}})
     var err error
-    {{if eq (len .Results) 1}}var zero_0 {{index .Results 0}}
+    {{if eq (len .Results) 1}}{{$ret := index .Results 0}}var zero_0 {{if $ret.IsStructPtr}}*{{end}}{{if $ret.IsStruct}}{{$ret.StructName}}{{else}}{{$ret.Type}}{{end}}
     if result.Err != nil {
         err = result.Err
     } else {
         err = json.Unmarshal([]byte(result.Result), &[]interface{}{&zero_0})
     }
     {{else}}var results []interface{}
-    {{range $index, $ret := .Results}}var zero_{{$index}} {{$ret}}
+    {{range $index, $ret := .Results}}var zero_{{$index}} {{if $ret.IsStructPtr}}*{{end}}{{if $ret.IsStruct}}{{$ret.StructName}}{{else}}{{$ret.Type}}{{end}}
     {{end}}if result.Err != nil {
         err = result.Err
     } else {
         err = json.Unmarshal([]byte(result.Result), &results)
         if err == nil {
-			{{range $index, $ret := .Results}}{{if eq $ret "error"}}if results[{{$index}}] != nil {
-				zero_{{$index}} = pthis.client.ConvertToType(results[{{$index}}], pthis.client.TypeNameToType("{{$ret}}")).({{$ret}})
-			}{{else if eq $ret "CustomType"}}zero_{{$index}} = pthis.client.ConvertToType(results[{{$index}}], reflect.TypeOf(CustomType{})).({{$ret}})
-			{{else}}zero_{{$index}} = pthis.client.ConvertToType(results[{{$index}}], pthis.client.TypeNameToType("{{$ret}}")).({{$ret}})
+			{{range $index, $ret := .Results}}{{if eq $ret.Type "error"}}if results[{{$index}}] != nil {
+				zero_{{$index}} = pthis.client.ConvertToType(results[{{$index}}], pthis.client.TypeNameToType("{{$ret.Type}}")).({{$ret.Type}})
+			}{{else if $ret.IsStruct}}zero_{{$index}} = pthis.client.ConvertToType(results[{{$index}}], reflect.TypeOf({{$ret.StructName}}{})).({{$ret.StructName}})
+			{{else if $ret.IsStructPtr}}zero_{{$index}} = new(*{{$ret.StructName}})
+			*zero_{{$index}} = pthis.client.ConvertToType(results[{{$index}}], reflect.TypeOf(&{{$ret.StructName}}{})).(*{{$ret.StructName}})
+			{{else}}zero_{{$index}} = pthis.client.ConvertToType(results[{{$index}}], pthis.client.TypeNameToType("{{$ret.Type}}")).({{$ret.Type}})
 			{{end}}{{end}}
         }
     }
@@ -97,8 +99,11 @@ func parseFuncDecl(className string, f *ast.FuncDecl, out *os.File) {
 
 	// 参数
 	var params []struct {
-		Name string
-		Type string
+		Name        string
+		Type        string
+		IsStruct    bool
+		IsStructPtr bool
+		StructName  string
 	}
 
 	if f.Type.Params != nil {
@@ -108,31 +113,72 @@ func parseFuncDecl(className string, f *ast.FuncDecl, out *os.File) {
 				log.Fatal(err)
 			}
 			paramType := typeNameBuf.String()
+			isStruct := false
+			isStructPtr := false
+			structName := ""
+			if ident, ok := p.Type.(*ast.Ident); ok && ident.Obj != nil && ident.Obj.Kind == ast.Typ {
+				isStruct = true
+				structName = ident.Name
+			} else if starExpr, ok := p.Type.(*ast.StarExpr); ok {
+				if ident, ok := starExpr.X.(*ast.Ident); ok && ident.Obj != nil && ident.Obj.Kind == ast.Typ {
+					isStructPtr = true
+					structName = ident.Name
+				}
+			}
 			if len(p.Names) > 0 {
 				for _, n := range p.Names {
 					params = append(params, struct {
-						Name string
-						Type string
-					}{n.Name, paramType})
+						Name        string
+						Type        string
+						IsStruct    bool
+						IsStructPtr bool
+						StructName  string
+					}{n.Name, paramType, isStruct, isStructPtr, structName})
 				}
 			} else {
 				params = append(params, struct {
-					Name string
-					Type string
-				}{"", paramType})
+					Name        string
+					Type        string
+					IsStruct    bool
+					IsStructPtr bool
+					StructName  string
+				}{"", paramType, isStruct, isStructPtr, structName})
 			}
 		}
 	}
 
 	// 返回值
-	var results []string
+	var results []struct {
+		Type        string
+		IsStruct    bool
+		IsStructPtr bool
+		StructName  string
+	}
 	if f.Type.Results != nil {
 		for _, r := range f.Type.Results.List {
 			typeNameBuf := &strings.Builder{}
 			if err := printer.Fprint(typeNameBuf, token.NewFileSet(), r.Type); err != nil {
 				log.Fatal(err)
 			}
-			results = append(results, typeNameBuf.String())
+			resultType := typeNameBuf.String()
+			isStruct := false
+			isStructPtr := false
+			structName := ""
+			if ident, ok := r.Type.(*ast.Ident); ok && ident.Obj != nil && ident.Obj.Kind == ast.Typ {
+				isStruct = true
+				structName = ident.Name
+			} else if starExpr, ok := r.Type.(*ast.StarExpr); ok {
+				if ident, ok := starExpr.X.(*ast.Ident); ok && ident.Obj != nil && ident.Obj.Kind == ast.Typ {
+					isStructPtr = true
+					structName = ident.Name
+				}
+			}
+			results = append(results, struct {
+				Type        string
+				IsStruct    bool
+				IsStructPtr bool
+				StructName  string
+			}{resultType, isStruct, isStructPtr, structName})
 		}
 	}
 
@@ -142,10 +188,18 @@ func parseFuncDecl(className string, f *ast.FuncDecl, out *os.File) {
 		ClassName string
 		Name      string
 		Params    []struct {
-			Name string
-			Type string
+			Name        string
+			Type        string
+			IsStruct    bool
+			IsStructPtr bool
+			StructName  string
 		}
-		Results []string
+		Results []struct {
+			Type        string
+			IsStruct    bool
+			IsStructPtr bool
+			StructName  string
+		}
 	}{
 		ClassName: className,
 		Name:      name,
