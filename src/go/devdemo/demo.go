@@ -40,8 +40,9 @@ func (tc *Client) TypeNameToType(typeName string) reflect.Type {
 	case "error":
 		return reflect.TypeOf(errors.New(""))
 	default:
-		panic("unsupported type: " + typeName)
+		fmt.Printf("unsupported type: %s\r\n" + typeName)
 	}
+	return nil
 }
 
 func convertBasicType(val interface{}, targetType reflect.Type) interface{} {
@@ -67,7 +68,8 @@ func convertBasicType(val interface{}, targetType reflect.Type) interface{} {
 			return v
 		}
 	default:
-		panic("unsupported type: " + targetType.String())
+		fmt.Printf("unsupported type: %s\r\n" + targetType.String())
+		return nil
 	}
 	return nil
 }
@@ -102,14 +104,16 @@ func (tc *Client) ConvertToType(val interface{}, targetType reflect.Type) interf
 		// Convert map[string]interface{} to JSON
 		jsonData, err := tc.codec.Marshal(val)
 		if err != nil {
-			panic(err)
+			fmt.Printf("reflect.Struct:%s\r\n", err.Error())
+			return nil
 		}
 
 		// Unmarshal JSON to the target type
 		targetVal := reflect.New(targetType).Interface()
 		err = tc.codec.Unmarshal(jsonData, targetVal)
 		if err != nil {
-			panic(err)
+			fmt.Printf("reflect.Struct Unmarshal:%s\r\n", err.Error())
+			return nil
 		}
 
 		return reflect.ValueOf(targetVal).Elem().Interface()
@@ -622,7 +626,7 @@ func (c *Client) Reply(req *MyPack, value string) error {
 func (c *Client) RegisterHandler(name string, handler HandlerFunc) {
 	v := reflect.ValueOf(handler)
 	if v.Kind() != reflect.Func {
-		fmt.Printf("Handler is not a function: %s\n", name)
+		fmt.Printf("Handler is not a function: %s\r\n", name)
 		return
 	}
 	c.handlerMap[name] = handler
@@ -646,7 +650,7 @@ func main() {
 			fmt.Printf("发生错误\r\n")
 			return nil
 		}
-		fmt.Printf("ret1,2:%d %d", ret1, ret2)
+		fmt.Printf("ret1,2:%d %d\r\n", ret1, ret2)
 
 		return nil
 	})
@@ -711,7 +715,7 @@ func main() {
 	}
 	elapsed := time.Since(start) // 计算经过的时间
 
-	fmt.Printf("The code executed in %s\n", elapsed)
+	fmt.Printf("The code executed in %s\r\n", elapsed)
 	//GenerateWrappers(client.GenerateDocs())
 
 	time.Sleep(666 * time.Second)
