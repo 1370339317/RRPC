@@ -19,14 +19,14 @@ func (pthis *{{.ClassName}}) {{.Name}}({{range $index, $param := .Params}}{{if $
     if result.Err != nil {
         err = result.Err
     } else {
-        err = json.Unmarshal([]byte(result.Result), &[]interface{}{&zero_0})
+        err =  pthis.client.codec.Unmarshal([]byte(result.Result), &[]interface{}{&zero_0})
     }
     {{else}}var results []interface{}
     {{range $index, $ret := .Results}}var zero_{{$index}} {{if $ret.IsStructPtr}}*{{end}}{{if $ret.IsStruct}}{{$ret.StructName}}{{else}}{{$ret.Type}}{{end}}
     {{end}}if result.Err != nil {
         err = result.Err
     } else {
-        err = json.Unmarshal([]byte(result.Result), &results)
+        err =  pthis.client.codec.Unmarshal([]byte(result.Result), &results)
         if err == nil {
 			{{range $index, $ret := .Results}}{{if eq $ret.Type "error"}}if results[{{$index}}] != nil {
 				zero_{{$index}} = pthis.client.ConvertToType(results[{{$index}}], pthis.client.TypeNameToType("{{$ret.Type}}")).({{$ret.Type}})
@@ -45,7 +45,6 @@ const predefCode = `
 package main
 
 import (
-	"encoding/json"
 	"reflect"
 )
 

@@ -1,19 +1,99 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	flexpacketprotocol "devdemo/protocol"
+	"encoding/gob"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"net"
 	"reflect"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	cbor "github.com/fxamacker/cbor/v2"
+	"github.com/vmihailenco/msgpack"
 )
+
+// -序列化反序列化工厂--------------------------------------------------------------------------------------------------------------
+
+type CodecFactory interface {
+	Create() Serializer
+}
+
+type MsgpackCodecFactory struct{}
+type GobCodecFactory struct{}
+type CborCodecFactory struct{}
+type JsonCodecFactory struct{}
+
+func (f *MsgpackCodecFactory) Create() Serializer {
+	return &MsgpackCodec{}
+}
+
+func (f *GobCodecFactory) Create() Serializer {
+	return &GobCodec{}
+}
+
+func (f *CborCodecFactory) Create() Serializer {
+	return &CborCodec{}
+}
+
+func (f *JsonCodecFactory) Create() Serializer {
+	return &JsonCodec{}
+}
+
+type MsgpackCodec struct{}
+type GobCodec struct{}
+type CborCodec struct{}
+type JsonCodec struct{}
+
+func (c *MsgpackCodec) Marshal(v interface{}) ([]byte, error) {
+	return msgpack.Marshal(v)
+}
+
+func (c *MsgpackCodec) Unmarshal(data []byte, v interface{}) error {
+	return msgpack.Unmarshal(data, v)
+}
+
+func (c *GobCodec) Marshal(v interface{}) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := gob.NewEncoder(&buf)
+	err := enc.Encode(v)
+	if err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+func (c *GobCodec) Unmarshal(data []byte, v interface{}) error {
+	buf := bytes.NewBuffer(data)
+	dec := gob.NewDecoder(buf)
+	return dec.Decode(v)
+}
+
+func (c *CborCodec) Marshal(v interface{}) ([]byte, error) {
+	return cbor.Marshal(v)
+}
+
+func (c *CborCodec) Unmarshal(data []byte, v interface{}) error {
+	return cbor.Unmarshal(data, v)
+}
+
+func (c *JsonCodec) Marshal(v interface{}) ([]byte, error) {
+	return json.Marshal(v)
+}
+
+func (c *JsonCodec) Unmarshal(data []byte, v interface{}) error {
+	return json.Unmarshal(data, v)
+}
+
+// -序列化反序列化工厂--------------------------------------------------------------------------------------------------------------
 
 // -数据转换与容错--------------------------------------------------------------------------------------------------------------
 
@@ -48,27 +128,109 @@ func (tc *Client) TypeNameToType(typeName string) reflect.Type {
 func convertBasicType(val interface{}, targetType reflect.Type) interface{} {
 	switch targetType.Kind() {
 	case reflect.Int:
-		if v, ok := val.(float64); ok {
-			return int(v)
+		switch v := val.(type) {
+		case float64:
+			if v >= float64(math.MinInt) && v <= float64(math.MaxInt) {
+				return int(v)
+			}
+		case int:
+			return v
+		case int64:
+			if v >= int64(math.MinInt) && v <= int64(math.MaxInt) {
+				return int(v)
+			}
+		case uint64:
+			if v <= uint64(math.MaxInt) {
+				return int(v)
+			}
+		default:
+			fmt.Printf("unsupported type: %T", val)
+			return nil
 		}
 	case reflect.Int64:
-		if v, ok := val.(float64); ok {
+		switch v := val.(type) {
+		case float64:
 			return int64(v)
+		case int:
+			return int64(v)
+		case int64:
+			return v
+		case uint64:
+			if v <= uint64(math.MaxInt64) {
+				return int64(v)
+			}
+		default:
+			fmt.Printf("unsupported type: %T", val)
+			return nil
+		}
+	case reflect.Uint:
+		switch v := val.(type) {
+		case float64:
+			if v >= 0 {
+				return uint(v)
+			}
+		case uint:
+			return v
+		case uint64:
+			return uint(v)
+		default:
+			fmt.Printf("unsupported type: %T", val)
+			return nil
+		}
+	case reflect.Uint64:
+		switch v := val.(type) {
+		case float64:
+			if v >= 0 {
+				return uint64(v)
+			}
+		case uint:
+			return uint64(v)
+		case uint64:
+			return v
+		default:
+			fmt.Printf("unsupported type: %T", val)
+			return nil
+		}
+	case reflect.Float32:
+		switch v := val.(type) {
+		case float64:
+			return float32(v)
+		case int:
+			return float32(v)
+		case int64:
+			return float32(v)
+		default:
+			fmt.Printf("unsupported type: %T", val)
+			return nil
 		}
 	case reflect.Float64:
-		if v, ok := val.(float64); ok {
+		switch v := val.(type) {
+		case float64:
 			return v
+		case int:
+			return float64(v)
+		case int64:
+			return float64(v)
+		default:
+			fmt.Printf("unsupported type: %T", val)
+			return nil
 		}
 	case reflect.String:
 		if v, ok := val.(string); ok {
 			return v
+		} else {
+			fmt.Printf("unsupported type: %T", val)
+			return nil
 		}
 	case reflect.Bool:
 		if v, ok := val.(bool); ok {
 			return v
+		} else {
+			fmt.Printf("unsupported type: %T", val)
+			return nil
 		}
 	default:
-		fmt.Printf("unsupported type: %s\r\n" + targetType.String())
+		fmt.Printf("unsupported type: %s", targetType.String())
 		return nil
 	}
 	return nil
@@ -85,13 +247,13 @@ func (tc *Client) ConvertToType(val interface{}, targetType reflect.Type) interf
 		ptr.Elem().Set(reflect.ValueOf(elemVal))
 		return ptr.Interface()
 	case reflect.Slice: // Handle slices
-		if v, ok := val.([]interface{}); ok {
-			slice := reflect.MakeSlice(targetType, len(v), len(v))
-			for i, elem := range v {
-				slice.Index(i).Set(reflect.ValueOf(tc.ConvertToType(elem, targetType.Elem())))
-			}
-			return slice.Interface()
+		slice := reflect.MakeSlice(targetType, 0, 0)
+		v := reflect.ValueOf(val)
+		for i := 0; i < v.Len(); i++ {
+			elem := v.Index(i).Interface()
+			slice = reflect.Append(slice, reflect.ValueOf(tc.ConvertToType(elem, targetType.Elem())))
 		}
+		return slice.Interface()
 	case reflect.Map: // Handle maps
 		if v, ok := val.(map[string]interface{}); ok {
 			m := reflect.MakeMap(targetType)
@@ -101,22 +263,53 @@ func (tc *Client) ConvertToType(val interface{}, targetType reflect.Type) interf
 			return m.Interface()
 		}
 	case reflect.Struct:
-		// Convert map[string]interface{} to JSON
-		jsonData, err := tc.codec.Marshal(val)
-		if err != nil {
-			fmt.Printf("reflect.Struct:%s\r\n", err.Error())
-			return nil
+		m := make(map[string]interface{})
+		switch v := val.(type) {
+		case map[string]interface{}:
+			m = v
+		case map[interface{}]interface{}:
+			for k, v := range v {
+				if ks, ok := k.(string); ok {
+					m[ks] = v
+				} else {
+					fmt.Printf("unsupported key type: %T", k)
+					return nil
+				}
+			}
+		default:
+			valValue := reflect.ValueOf(val)
+			valType := valValue.Type()
+			for i := 0; i < valValue.NumField(); i++ {
+				fieldName := valType.Field(i).Name
+				fieldValue := valValue.Field(i).Interface()
+				m[fieldName] = fieldValue
+			}
 		}
 
-		// Unmarshal JSON to the target type
-		targetVal := reflect.New(targetType).Interface()
-		err = tc.codec.Unmarshal(jsonData, targetVal)
-		if err != nil {
-			fmt.Printf("reflect.Struct Unmarshal:%s\r\n", err.Error())
-			return nil
+		targetVal := reflect.New(targetType).Elem()
+		for i := 0; i < targetVal.NumField(); i++ {
+			fieldName := targetType.Field(i).Name
+			fieldValue := targetVal.Field(i)
+
+			if !fieldValue.CanSet() {
+				continue
+			}
+
+			mapValue, ok := m[fieldName]
+			if !ok {
+				continue
+			}
+
+			converted := tc.ConvertToType(mapValue, fieldValue.Type())
+			if converted == nil {
+				continue
+			}
+
+			fieldValue.Set(reflect.ValueOf(converted))
 		}
 
-		return reflect.ValueOf(targetVal).Elem().Interface()
+		return targetVal.Interface()
+
 	case reflect.Interface: // Handle error interface
 		if targetType.Name() == "error" {
 			if v, ok := val.(string); ok {
@@ -131,34 +324,91 @@ func (tc *Client) ConvertToType(val interface{}, targetType reflect.Type) interf
 
 //-数据转换与容错--------------------------------------------------------------------------------------------------------------
 
-type Codec interface {
+type Serializer interface {
 	Marshal(interface{}) ([]byte, error)
 	Unmarshal([]byte, interface{}) error
 }
 
-type TransparentCodec struct{}
+var Marshaltypr int = 3
 
-func NewTransparentCodec() *TransparentCodec {
-	return &TransparentCodec{}
-}
+// // Encode 方法返回序列化后的数据，而不是直接写入 conn
+// func (c *TransparentCodec) Marshal(v interface{}) ([]byte, error) {
 
-// Encode 方法返回序列化后的数据，而不是直接写入 conn
-func (c *TransparentCodec) Marshal(v interface{}) ([]byte, error) {
-	data, err := json.Marshal(v)
-	if err != nil {
-		return nil, fmt.Errorf("TransparentCodec: unsupported data type %T", v)
-	}
-	return data, nil
-}
+// 	switch Marshaltypr {
+// 	case 1:
 
-// Decode 方法从数据中反序列化，而不是直接从 conn 读取
-func (c *TransparentCodec) Unmarshal(data []byte, v interface{}) error {
-	err := json.Unmarshal(data, v)
-	if err != nil {
-		return fmt.Errorf("TransparentCodec: failed to unmarshal data: %v", err)
-	}
-	return nil
-}
+// 		data, err := msgpack.Marshal(v)
+// 		if err != nil {
+// 			return nil, fmt.Errorf("TransparentCodec: unsupported data type %T", v)
+// 		}
+
+// 		return data, nil
+// 	case 2:
+// 		// 创建一个缓冲区来存储序列化的数据
+// 		var buf bytes.Buffer
+// 		enc := gob.NewEncoder(&buf)
+
+// 		// 使用 Encoder.Encode 方法进行序列化
+// 		if err := enc.Encode(v); err != nil {
+// 			log.Fatalf("encode error: %v", err)
+// 		}
+
+// 		return buf.Bytes(), nil
+// 	case 3:
+
+// 		data, err := cbor.Marshal(v)
+// 		if err != nil {
+// 			return nil, fmt.Errorf("TransparentCodec: unsupported data type %T", v)
+// 		}
+
+// 		return data, nil
+// 	default:
+// 		data, err := json.Marshal(v)
+// 		if err != nil {
+// 			return nil, fmt.Errorf("TransparentCodec: unsupported data type %T", v)
+// 		}
+// 		return data, nil
+// 	}
+
+// }
+
+// // Decode 方法从数据中反序列化，而不是直接从 conn 读取
+// func (c *TransparentCodec) Unmarshal(data []byte, v interface{}) error {
+// 	switch Marshaltypr {
+// 	case 1:
+// 		err := msgpack.Unmarshal(data, v)
+// 		if err != nil {
+// 			return fmt.Errorf("TransparentCodec: failed to unmarshal data: %v", err)
+// 		}
+// 		return nil
+// 	case 2:
+
+// 		// 创建一个缓冲区来存储序列化的数据
+// 		var buf bytes.Buffer
+// 		buf.Write(data)
+// 		// 创建一个 gob.Decoder
+// 		dec := gob.NewDecoder(&buf)
+
+// 		// 使用 Decoder.Decode 方法进行反序列化
+// 		if err := dec.Decode(v); err != nil {
+// 			log.Fatalf("decode error: %v", err)
+// 		}
+// 	case 3:
+
+// 		err := cbor.Unmarshal(data, v)
+// 		if err != nil {
+// 			return fmt.Errorf("TransparentCodec: failed to unmarshal data: %v", err)
+// 		}
+// 		return nil
+// 	default:
+// 		err := json.Unmarshal(data, v)
+// 		if err != nil {
+// 			return fmt.Errorf("TransparentCodec: failed to unmarshal data: %v", err)
+// 		}
+// 		return nil
+// 	}
+// 	return nil
+// }
 
 type WorkerPool struct {
 	workers int
@@ -209,7 +459,7 @@ type HandlerFunc interface{}
 
 type Client struct {
 	conn        net.Conn
-	codec       Codec
+	codec       Serializer
 	sendCh      chan *MyPack
 	recvCh      chan *MyPack
 	serverReqCh chan *MyPack
@@ -260,20 +510,18 @@ func (c *Client) receive(v *MyPack) error {
 	return c.codec.Unmarshal(data, v)
 }
 
-func Dial(address string) (*Client, error) {
+func Dial(address string, codecFactory CodecFactory) (*Client, error) {
 	conn, err := net.Dial("tcp", address)
 	if err != nil {
 		return nil, err
 	}
-
-	codec := NewTransparentCodec()
 
 	pool := NewWorkerPool(10, nil) // 创建一个没有处理函数的WorkerPool
 	//报文协议
 	protocol := flexpacketprotocol.New(conn, []byte("aacc"), []byte("eezz"))
 	client := &Client{
 		conn:        conn,
-		codec:       codec,
+		codec:       codecFactory.Create(),
 		sendCh:      make(chan *MyPack),
 		recvCh:      make(chan *MyPack),
 		serverReqCh: make(chan *MyPack),
@@ -293,21 +541,23 @@ func Dial(address string) (*Client, error) {
 
 type ClientHandler func(*Client) error
 type Server struct {
-	listener    net.Listener
-	clients     []*Client
-	onNewClient ClientHandler
+	listener     net.Listener
+	clients      []*Client
+	onNewClient  ClientHandler
+	CodecFactory CodecFactory
 }
 
-func NewServer(address string, onNewClient func(*Client) error) (*Server, error) {
+func NewServer(address string, onNewClient func(*Client) error, codecFactory CodecFactory) (*Server, error) {
 	listener, err := net.Listen("tcp", address)
 	if err != nil {
 		return nil, err
 	}
 
 	server := &Server{
-		listener:    listener,
-		clients:     make([]*Client, 0),
-		onNewClient: onNewClient,
+		listener:     listener,
+		clients:      make([]*Client, 0),
+		onNewClient:  onNewClient,
+		CodecFactory: codecFactory,
 	}
 
 	go server.acceptConnections()
@@ -318,12 +568,12 @@ func (s *Server) Close() error {
 	return s.listener.Close()
 }
 func (s *Server) NewClient(conn net.Conn) *Client {
-	codec := NewTransparentCodec()
+
 	pool := NewWorkerPool(10, nil)
 	protocol := flexpacketprotocol.New(conn, []byte("aacc"), []byte("eezz"))
 	client := &Client{
 		conn:        conn,
-		codec:       codec,
+		codec:       s.CodecFactory.Create(),
 		sendCh:      make(chan *MyPack),
 		recvCh:      make(chan *MyPack),
 		serverReqCh: make(chan *MyPack),
@@ -376,7 +626,7 @@ func (c *Client) convertArg(arg interface{}, argType reflect.Type) (reflect.Valu
 }
 
 // 公共的处理rpc请求
-func (c *Client) handleRequest(req *MyPack, codec Codec) {
+func (c *Client) handleRequest(req *MyPack) {
 
 	// 创建响应对象
 	res := &MyPack{
@@ -390,7 +640,7 @@ func (c *Client) handleRequest(req *MyPack, codec Codec) {
 	if ok {
 		// 解析参数数组
 		var rawArgs []interface{}
-		err := codec.Unmarshal([]byte(req.Args), &rawArgs)
+		err := c.codec.Unmarshal([]byte(req.Args), &rawArgs)
 		if err == nil {
 
 			// 反射调用处理函数
@@ -419,11 +669,11 @@ func (c *Client) handleRequest(req *MyPack, codec Codec) {
 					argsInterface[i] = v.Interface()
 				}
 
-				// 将参数序列化为JSON字符串
-				argsJson, err := codec.Marshal(argsInterface)
+				// 将参数序列化为字节数组
+				argsbytes, err := c.codec.Marshal(argsInterface)
 				if err == nil {
 
-					res.Args = argsJson
+					res.Args = argsbytes
 
 					// 将处理函数的返回值从反射类型转换回实际的值
 					outInterface := make([]interface{}, len(out))
@@ -431,10 +681,10 @@ func (c *Client) handleRequest(req *MyPack, codec Codec) {
 						outInterface[i] = v.Interface()
 					}
 
-					// 将返回值序列化为JSON字符串
-					outJson, err := codec.Marshal(outInterface)
+					// 将返回值序列化为字节数组
+					outbytes, err := c.codec.Marshal(outInterface)
 					if err == nil {
-						res.Result = outJson
+						res.Result = outbytes
 					} else {
 						// 处理错误
 						res.Error = fmt.Sprintf("outInterface Marshal fail: %s", err.Error())
@@ -470,7 +720,7 @@ func (c *Client) HandleServerRequest() {
 	c.pool.Start()
 	go func() {
 		for pack := range c.serverReqCh {
-			c.handleRequest(pack, c.codec)
+			c.handleRequest(pack)
 		}
 	}()
 }
@@ -562,7 +812,7 @@ func (c *Client) setArgValue(v reflect.Value, result interface{}) error {
 }
 
 func (c *Client) InvokeWithTimeout(method string, timeout time.Duration, args ...interface{}) *InvokeResult {
-	// 将参数序列化为JSON字符串
+	// 将参数序列化为字节数组
 	value, err := c.codec.Marshal(args)
 	if err != nil {
 		return &InvokeResult{Err: fmt.Errorf("failed to marshal args: %v", err)}
@@ -632,33 +882,8 @@ func (c *Client) RegisterHandler(name string, handler HandlerFunc) {
 	c.handlerMap[name] = handler
 }
 
-func main() {
-
-	_, err := NewServer("127.0.0.1:6688", func(c *Client) error {
-		c.RegisterHandler("ToUpper", ToUpper)
-		c.RegisterHandler("Add", Add)
-		c.RegisterHandler("Add2", Add2)
-		c.RegisterHandler("TestRPCFunc", TestRPCFunc)
-		remotestub := Lpcstub1{
-			client: c,
-		}
-
-		fmt.Printf("=====新的客户端接入=====\r\n")
-		fmt.Printf("使用桩回调客户端rpc过程Add2\r\n")
-		ret1, ret2, err := remotestub.Add2(1, 2)
-		if err != nil {
-			fmt.Printf("发生错误\r\n")
-			return nil
-		}
-		fmt.Printf("ret1,2:%d %d\r\n", ret1, ret2)
-
-		return nil
-	})
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	client, err := Dial("127.0.0.1:6688")
+func tttclient(factory CodecFactory) {
+	client, err := Dial("127.0.0.1:6688", factory)
 	if err != nil {
 		fmt.Println("Error:", err)
 		return
@@ -717,6 +942,42 @@ func main() {
 
 	fmt.Printf("The code executed in %s\r\n", elapsed)
 	//GenerateWrappers(client.GenerateDocs())
+}
+func main() {
+
+	factory := &JsonCodecFactory{}
+
+	gob.Register(CustomType{})
+	_, err := NewServer("127.0.0.1:6688", func(c *Client) error {
+		c.RegisterHandler("ToUpper", ToUpper)
+		c.RegisterHandler("Add", Add)
+		c.RegisterHandler("Add2", Add2)
+		c.RegisterHandler("TestRPCFunc", TestRPCFunc)
+
+		if false {
+			remotestub := Lpcstub1{
+				client: c,
+			}
+
+			fmt.Printf("=====新的客户端接入=====\r\n")
+			fmt.Printf("使用桩回调客户端rpc过程Add2\r\n")
+			ret1, ret2, err := remotestub.Add2(1, 2)
+			if err != nil {
+				fmt.Printf("发生错误\r\n")
+				return nil
+			}
+			fmt.Printf("ret1,2:%d %d\r\n", ret1, ret2)
+		}
+
+		return nil
+	}, factory)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	for i := 0; i < 4; i++ {
+		tttclient(factory)
+	}
 
 	time.Sleep(666 * time.Second)
 }
