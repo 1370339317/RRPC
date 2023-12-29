@@ -1,7 +1,11 @@
 package main
 
 import (
+	"strconv"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 var server *Server
@@ -24,66 +28,64 @@ func TestMain(m *testing.M) {
 	m.Run()
 }
 
-func benchmarkTestRPCFunc(b *testing.B, factory CodecFactory, concurrency int) {
-	b.SetParallelism(concurrency) // 设置并发级别
-	b.ResetTimer()
+func BenchmarkRPC(b *testing.B) {
+	concurrencyLevels := []int{1, 2, 4, 8, 16, 32, 64, 128, 256} // 并发级别
 
-	b.RunParallel(func(pb *testing.PB) {
-		client, err := Dial("127.0.0.1:6688", factory)
-		if err != nil {
-			b.Fatal(err)
-		}
+	for _, concurrency := range concurrencyLevels {
+		b.Run("Concurrency"+strconv.Itoa(concurrency), func(b *testing.B) {
+			var counter int64      // 原子计数器
+			wg := sync.WaitGroup{} // 用于同步所有 goroutine
+			wg.Add(concurrency)
 
-		remotestub := Lpcstub1{
-			client: client,
-		}
+			start := time.Now() // 记录开始时间
 
-		arg1 := 10
-		arg2 := 20.0
-		arg3 := "hello"
-		arg4 := true
-		arg5 := []int{1, 2, 3}
-		arg6 := "world"
-		arg7 := CustomType{
-			Field1: 100,
-			Field2: "foo",
-		}
-		arg8 := CustomType{
-			Field1: 666,
-			Field2: "dqq",
-		}
+			for i := 0; i < concurrency; i++ {
+				go func() {
+					defer wg.Done()
 
-		for pb.Next() {
-			_, _, _, _, _, _, _, _, err, err2 := remotestub.TestRPCFunc(arg1, arg2, arg3, arg4, arg5, &arg6, arg7, &arg8)
-			if err2 != nil || err != nil {
-				b.Fatal(err2, err)
+					client, err := Dial("127.0.0.1:6688", factory)
+					if err != nil {
+						b.Fatal(err)
+					}
+
+					remotestub := Lpcstub1{
+						client: client,
+					}
+
+					for {
+						if atomic.AddInt64(&counter, 1) > int64(b.N) {
+							break
+						}
+						// 发送 RPC 请求...
+
+						arg1 := 10
+						arg2 := 20.0
+						arg3 := "hello"
+						arg4 := true
+						arg5 := []int{1, 2, 3}
+						arg6 := "world"
+						arg7 := CustomType{
+							Field1: 100,
+							Field2: "foo",
+						}
+						arg8 := CustomType{
+							Field1: 666,
+							Field2: "dqq",
+						}
+
+						_, _, _, _, _, _, _, _, err, err2 := remotestub.TestRPCFunc(arg1, arg2, arg3, arg4, arg5, &arg6, arg7, &arg8)
+						if err2 != nil || err != nil {
+							b.Fatal(err2, err)
+						}
+					}
+				}()
 			}
-		}
-	})
-}
 
-// ... 你的基准测试函数 ...
+			wg.Wait() // 等待所有 goroutine 完成
 
-func BenchmarkTestRPCFunc1(b *testing.B) {
-	benchmarkTestRPCFunc(b, factory, 1)
-}
+			elapsed := time.Since(start) // 计算经过的时间
 
-func BenchmarkTestRPCFunc500(b *testing.B) {
-	benchmarkTestRPCFunc(b, factory, 500)
-}
-
-func BenchmarkTestRPCFunc2000(b *testing.B) {
-	benchmarkTestRPCFunc(b, factory, 2000)
-}
-
-func BenchmarkTestRPCFunc5000(b *testing.B) {
-	benchmarkTestRPCFunc(b, factory, 5000)
-}
-
-func BenchmarkTestRPCFunc10000(b *testing.B) {
-	benchmarkTestRPCFunc(b, factory, 10000)
-}
-
-func BenchmarkTestRPCFunc100000(b *testing.B) {
-	benchmarkTestRPCFunc(b, factory, 100000)
+			b.Logf("reqs/sec: %f", float64(counter)/elapsed.Seconds()) // 报告每秒的请求数
+		})
+	}
 }
