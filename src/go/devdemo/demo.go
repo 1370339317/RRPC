@@ -495,6 +495,15 @@ func (c *Client) readFromConn() ([]byte, error) {
 
 func (c *Client) send(v *MyPack) error {
 	data, err := c.codec.Marshal(v)
+	fmt.Print("unsigned char data[] = {")
+	for i, byte := range data {
+		if i != 0 {
+			fmt.Print(", ")
+		}
+		fmt.Printf("0x%02x", byte)
+	}
+	fmt.Println("};")
+	fmt.Printf("% x", data)
 	if err != nil {
 		return err
 	}
@@ -902,6 +911,15 @@ func tttclient(factory CodecFactory) {
 			client: client,
 		}
 
+		fmt.Printf("=====新的客户端接入=====\r\n")
+		fmt.Printf("使用桩回调客户端rpc过程Add2\r\n")
+		ret1, err := remotestub.Add(1, 2)
+		if err != nil {
+			fmt.Printf("发生错误\r\n")
+			return
+		}
+		fmt.Printf("ret1,2:%d %d\r\n", ret1)
+
 		// ret1, err := remotestub.Add(1, 2)
 		// if err != nil {
 		// 	return
@@ -945,7 +963,7 @@ func tttclient(factory CodecFactory) {
 }
 func main() {
 
-	factory := &JsonCodecFactory{}
+	factory := &MsgpackCodecFactory{}
 
 	gob.Register(CustomType{})
 	_, err := NewServer("127.0.0.1:6688", func(c *Client) error {
