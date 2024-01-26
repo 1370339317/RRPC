@@ -39,47 +39,50 @@ func (fpp *flexPacketProtocol) Write(data []byte) (int, error) {
 }
 
 func (fpp *flexPacketProtocol) Read(data []byte) (int, error) {
-	header := make([]byte, len(fpp.header)+4)
-	_, err := io.ReadFull(fpp.conn, header)
-	if err != nil {
-		return 0, err
-	}
+	for {
+		header := make([]byte, len(fpp.header)+4)
+		_, err := io.ReadFull(fpp.conn, header)
+		if err != nil {
+			return 0, err
+		}
 
-	length := binary.BigEndian.Uint32(header[len(fpp.header):])
-	if len(data) < int(length) {
-		return 0, fmt.Errorf("buffer too small")
-	}
+		length := binary.BigEndian.Uint32(header[len(fpp.header):])
+		if len(data) < int(length) {
+			return 0, fmt.Errorf("buffer too small")
+		}
 
-	n, err := io.ReadFull(fpp.conn, data[:length])
-	if err != nil {
-		return n, err
-	}
+		n, err := io.ReadFull(fpp.conn, data[:length])
+		if err != nil {
+			return n, err
+		}
 
-	checksumBytes := make([]byte, 4)
-	_, err = io.ReadFull(fpp.conn, checksumBytes)
-	if err != nil {
-		return n, err
-	}
+		checksumBytes := make([]byte, 4)
+		_, err = io.ReadFull(fpp.conn, checksumBytes)
+		if err != nil {
+			return n, err
+		}
 
-	checksum := binary.BigEndian.Uint32(checksumBytes)
-	if fpp.checksum(data[:length]) != checksum {
-		return n, fmt.Errorf("checksum error")
-	}
+		checksum := binary.BigEndian.Uint32(checksumBytes)
+		if fpp.checksum(data[:length]) != checksum {
+			continue // Skip this packet and try the next one
+		}
 
-	footer := make([]byte, len(fpp.footer))
-	_, err = io.ReadFull(fpp.conn, footer)
-	if err != nil {
-		return n, err
-	}
+		footer := make([]byte, len(fpp.footer))
+		_, err = io.ReadFull(fpp.conn, footer)
+		if err != nil {
+			return n, err
+		}
 
-	if string(footer) != string(fpp.footer) {
-		return n, fmt.Errorf("incorrect frame footer")
-	}
+		if string(footer) != string(fpp.footer) {
+			continue // Skip this packet and try the next one
+		}
 
-	return n, nil
+		return n, nil
+	}
 }
 
 // 私有的校验和函数
 func crc32Checksum(data []byte) uint32 {
 	return crc32.ChecksumIEEE(data)
+
 }
