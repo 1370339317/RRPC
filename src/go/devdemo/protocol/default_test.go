@@ -2,6 +2,7 @@ package flexpacketprotocol
 
 import (
 	"bytes"
+	"fmt"
 	"testing"
 )
 
@@ -9,6 +10,8 @@ func TestFlexPacketProtocol(t *testing.T) {
 	header := []byte("HEADER")
 	footer := []byte("FOOTER")
 
+	header = []byte{0x56, 0x78, 0x89}
+	footer = []byte{0x45, 0x67, 0x34}
 	// 测试数据
 	testData := []byte("Hello, world!")
 
@@ -20,6 +23,12 @@ func TestFlexPacketProtocol(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Write failed: %v", err)
 		}
+
+		// 输出16进制的数据
+		for _, b := range buffer.Bytes() {
+			fmt.Printf("%02x ", b)
+		}
+		fmt.Println()
 
 		if n != len(testData) {
 			t.Fatalf("Write returned wrong count: got %v, want %v", n, len(testData))

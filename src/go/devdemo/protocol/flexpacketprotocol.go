@@ -1,6 +1,7 @@
 package flexpacketprotocol
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"hash/crc32"
@@ -39,45 +40,64 @@ func (fpp *flexPacketProtocol) Write(data []byte) (int, error) {
 }
 
 func (fpp *flexPacketProtocol) Read(data []byte) (int, error) {
+	headerBuffer := make([]byte, len(fpp.header))
+	_, err := io.ReadFull(fpp.conn, headerBuffer)
+	if err != nil {
+		return 0, err
+	}
+
 	for {
-		header := make([]byte, len(fpp.header)+4)
-		_, err := io.ReadFull(fpp.conn, header)
-		if err != nil {
-			return 0, err
-		}
+		// 检查头部是否正确
+		if bytes.Equal(headerBuffer, fpp.header) {
+			lengthBytes := make([]byte, 4)
+			_, err = io.ReadFull(fpp.conn, lengthBytes)
+			if err != nil {
+				return 0, err
+			}
 
-		length := binary.BigEndian.Uint32(header[len(fpp.header):])
-		if len(data) < int(length) {
-			return 0, fmt.Errorf("buffer too small")
-		}
+			length := binary.BigEndian.Uint32(lengthBytes)
+			if len(data) < int(length) {
+				return 0, fmt.Errorf("buffer too small")
+			}
 
-		n, err := io.ReadFull(fpp.conn, data[:length])
-		if err != nil {
-			return n, err
-		}
+			n, err := io.ReadFull(fpp.conn, data[:length])
+			if err != nil {
+				return n, err
+			}
 
-		checksumBytes := make([]byte, 4)
-		_, err = io.ReadFull(fpp.conn, checksumBytes)
-		if err != nil {
-			return n, err
-		}
+			checksumBytes := make([]byte, 4)
+			_, err = io.ReadFull(fpp.conn, checksumBytes)
+			if err != nil {
+				return n, err
+			}
 
-		checksum := binary.BigEndian.Uint32(checksumBytes)
-		if fpp.checksum(data[:length]) != checksum {
-			continue // Skip this packet and try the next one
-		}
+			checksum := binary.BigEndian.Uint32(checksumBytes)
+			if fpp.checksum(data[:length]) != checksum {
+				continue // Skip this packet and try the next one
+			}
 
-		footer := make([]byte, len(fpp.footer))
-		_, err = io.ReadFull(fpp.conn, footer)
-		if err != nil {
-			return n, err
-		}
+			footer := make([]byte, len(fpp.footer))
+			_, err = io.ReadFull(fpp.conn, footer)
+			if err != nil {
+				return n, err
+			}
 
-		if string(footer) != string(fpp.footer) {
-			continue // Skip this packet and try the next one
-		}
+			if !bytes.Equal(footer, fpp.footer) {
+				continue // Skip this packet and try the next one
+			}
 
-		return n, nil
+			return n, nil
+
+		} else {
+			// 如果头部不正确，那么向右滑动一个字节
+			copy(headerBuffer, headerBuffer[1:])
+			newByte := make([]byte, 1)
+			_, err = io.ReadFull(fpp.conn, newByte)
+			if err != nil {
+				return 0, err
+			}
+			headerBuffer[len(headerBuffer)-1] = newByte[0]
+		}
 	}
 }
 
