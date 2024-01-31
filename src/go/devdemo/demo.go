@@ -963,6 +963,23 @@ func tttclient(factory CodecFactory) {
 }
 func main() {
 
+	startTime := time.Now() // 获取开始时间
+
+	var dddd []byte
+	for i := 0; i < 100000; i++ {
+
+		v := MyPack{ID: 6}
+		da, e := msgpack.Marshal(v)
+		if e == nil {
+			dddd = da
+		}
+	}
+
+	print(dddd)
+
+	elapsed := time.Since(startTime) // 计算从startTime到现在所经过的时间
+	fmt.Printf("代码块运行时间: %s\n", elapsed)
+
 	factory := &MsgpackCodecFactory{}
 
 	gob.Register(CustomType{})
