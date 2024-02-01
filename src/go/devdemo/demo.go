@@ -135,6 +135,12 @@ func convertBasicType(val interface{}, targetType reflect.Type) interface{} {
 			}
 		case int:
 			return v
+		case int8:
+			return int(v)
+		case int16:
+			return int(v)
+		case int32:
+			return int(v)
 		case int64:
 			if v >= int64(math.MinInt) && v <= int64(math.MaxInt) {
 				return int(v)
@@ -493,8 +499,7 @@ func (c *Client) readFromConn() ([]byte, error) {
 	}
 }
 
-func (c *Client) send(v *MyPack) error {
-	data, err := c.codec.Marshal(v)
+func PrintHex(data []byte) {
 	fmt.Print("unsigned char data[] = {")
 	for i, byte := range data {
 		if i != 0 {
@@ -504,6 +509,10 @@ func (c *Client) send(v *MyPack) error {
 	}
 	fmt.Println("};")
 	fmt.Printf("% x", data)
+}
+func (c *Client) send(v *MyPack) error {
+	data, err := c.codec.Marshal(v)
+
 	if err != nil {
 		return err
 	}
@@ -913,12 +922,23 @@ func tttclient(factory CodecFactory) {
 
 		fmt.Printf("=====新的客户端接入=====\r\n")
 		fmt.Printf("使用桩回调客户端rpc过程Add2\r\n")
-		ret1, err := remotestub.Add(1, 2)
-		if err != nil {
-			fmt.Printf("发生错误\r\n")
-			return
+
+		startTime := time.Now() // 获取开始时间
+
+		for i := 0; i < 10000; i++ {
+			a := 1
+			b := 1
+			client.Invoke("Add", &a, b)
+			ret1, err := remotestub.Add(1, 2)
+			if err != nil {
+				fmt.Printf("发生错误%d\r\n", ret1)
+				return
+			}
+			//fmt.Printf("ret1,2:%d %d\r\n", ret1)
 		}
-		fmt.Printf("ret1,2:%d %d\r\n", ret1)
+
+		elapsed := time.Since(startTime) // 计算从startTime到现在所经过的时间
+		fmt.Printf("代码块运行时间: %s\n", elapsed)
 
 		// ret1, err := remotestub.Add(1, 2)
 		// if err != nil {
@@ -982,33 +1002,33 @@ func main() {
 
 	factory := &MsgpackCodecFactory{}
 
-	gob.Register(CustomType{})
-	_, err := NewServer("127.0.0.1:6688", func(c *Client) error {
-		c.RegisterHandler("ToUpper", ToUpper)
-		c.RegisterHandler("Add", Add)
-		c.RegisterHandler("Add2", Add2)
-		c.RegisterHandler("TestRPCFunc", TestRPCFunc)
+	// gob.Register(CustomType{})
+	// _, err := NewServer("127.0.0.1:6688", func(c *Client) error {
+	// 	c.RegisterHandler("ToUpper", ToUpper)
+	// 	c.RegisterHandler("Add", Add)
+	// 	c.RegisterHandler("Add2", Add2)
+	// 	c.RegisterHandler("TestRPCFunc", TestRPCFunc)
 
-		if false {
-			remotestub := Lpcstub1{
-				client: c,
-			}
+	// 	if false {
+	// 		remotestub := Lpcstub1{
+	// 			client: c,
+	// 		}
 
-			fmt.Printf("=====新的客户端接入=====\r\n")
-			fmt.Printf("使用桩回调客户端rpc过程Add2\r\n")
-			ret1, ret2, err := remotestub.Add2(1, 2)
-			if err != nil {
-				fmt.Printf("发生错误\r\n")
-				return nil
-			}
-			fmt.Printf("ret1,2:%d %d\r\n", ret1, ret2)
-		}
+	// 		fmt.Printf("=====新的客户端接入=====\r\n")
+	// 		fmt.Printf("使用桩回调客户端rpc过程Add2\r\n")
+	// 		ret1, ret2, err := remotestub.Add2(1, 2)
+	// 		if err != nil {
+	// 			fmt.Printf("发生错误\r\n")
+	// 			return nil
+	// 		}
+	// 		fmt.Printf("ret1,2:%d %d\r\n", ret1, ret2)
+	// 	}
 
-		return nil
-	}, factory)
-	if err != nil {
-		log.Fatal(err)
-	}
+	// 	return nil
+	// }, factory)
+	// if err != nil {
+	// 	log.Fatal(err)
+	// }
 
 	for i := 0; i < 4; i++ {
 		tttclient(factory)
