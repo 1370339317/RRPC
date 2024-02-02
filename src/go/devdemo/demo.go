@@ -17,7 +17,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	_ "github.com/1370339317/websocketstream"
 	cbor "github.com/fxamacker/cbor/v2"
+
 	"github.com/vmihailenco/msgpack"
 )
 
@@ -335,87 +337,6 @@ type Serializer interface {
 	Unmarshal([]byte, interface{}) error
 }
 
-var Marshaltypr int = 3
-
-// // Encode 方法返回序列化后的数据，而不是直接写入 conn
-// func (c *TransparentCodec) Marshal(v interface{}) ([]byte, error) {
-
-// 	switch Marshaltypr {
-// 	case 1:
-
-// 		data, err := msgpack.Marshal(v)
-// 		if err != nil {
-// 			return nil, fmt.Errorf("TransparentCodec: unsupported data type %T", v)
-// 		}
-
-// 		return data, nil
-// 	case 2:
-// 		// 创建一个缓冲区来存储序列化的数据
-// 		var buf bytes.Buffer
-// 		enc := gob.NewEncoder(&buf)
-
-// 		// 使用 Encoder.Encode 方法进行序列化
-// 		if err := enc.Encode(v); err != nil {
-// 			log.Fatalf("encode error: %v", err)
-// 		}
-
-// 		return buf.Bytes(), nil
-// 	case 3:
-
-// 		data, err := cbor.Marshal(v)
-// 		if err != nil {
-// 			return nil, fmt.Errorf("TransparentCodec: unsupported data type %T", v)
-// 		}
-
-// 		return data, nil
-// 	default:
-// 		data, err := json.Marshal(v)
-// 		if err != nil {
-// 			return nil, fmt.Errorf("TransparentCodec: unsupported data type %T", v)
-// 		}
-// 		return data, nil
-// 	}
-
-// }
-
-// // Decode 方法从数据中反序列化，而不是直接从 conn 读取
-// func (c *TransparentCodec) Unmarshal(data []byte, v interface{}) error {
-// 	switch Marshaltypr {
-// 	case 1:
-// 		err := msgpack.Unmarshal(data, v)
-// 		if err != nil {
-// 			return fmt.Errorf("TransparentCodec: failed to unmarshal data: %v", err)
-// 		}
-// 		return nil
-// 	case 2:
-
-// 		// 创建一个缓冲区来存储序列化的数据
-// 		var buf bytes.Buffer
-// 		buf.Write(data)
-// 		// 创建一个 gob.Decoder
-// 		dec := gob.NewDecoder(&buf)
-
-// 		// 使用 Decoder.Decode 方法进行反序列化
-// 		if err := dec.Decode(v); err != nil {
-// 			log.Fatalf("decode error: %v", err)
-// 		}
-// 	case 3:
-
-// 		err := cbor.Unmarshal(data, v)
-// 		if err != nil {
-// 			return fmt.Errorf("TransparentCodec: failed to unmarshal data: %v", err)
-// 		}
-// 		return nil
-// 	default:
-// 		err := json.Unmarshal(data, v)
-// 		if err != nil {
-// 			return fmt.Errorf("TransparentCodec: failed to unmarshal data: %v", err)
-// 		}
-// 		return nil
-// 	}
-// 	return nil
-// }
-
 type WorkerPool struct {
 	workers int
 	jobs    chan func()
@@ -464,7 +385,7 @@ type InvokeResult struct {
 type HandlerFunc interface{}
 
 type Client struct {
-	conn        net.Conn
+	conn        io.ReadWriter
 	codec       Serializer
 	sendCh      chan *MyPack
 	recvCh      chan *MyPack
@@ -478,11 +399,13 @@ type Client struct {
 	frameWriter io.Writer
 }
 
+// 发送协议帧
 func (c *Client) writeToConn(data []byte) error {
 	_, err := c.frameWriter.Write(data)
 	return err
 }
 
+// 读取协议帧
 func (c *Client) readFromConn() ([]byte, error) {
 	size := 1024 // 初始缓冲区大小
 	for {
@@ -510,6 +433,8 @@ func PrintHex(data []byte) {
 	fmt.Println("};")
 	fmt.Printf("% x", data)
 }
+
+// 序列化逻辑结构并发送到帧协议层
 func (c *Client) send(v *MyPack) error {
 	data, err := c.codec.Marshal(v)
 
@@ -520,6 +445,7 @@ func (c *Client) send(v *MyPack) error {
 	return c.writeToConn(data)
 }
 
+// 从帧协议层读取报文并反序列化
 func (c *Client) receive(v *MyPack) error {
 	data, err := c.readFromConn()
 	if err != nil {
@@ -528,11 +454,8 @@ func (c *Client) receive(v *MyPack) error {
 	return c.codec.Unmarshal(data, v)
 }
 
-func Dial(address string, codecFactory CodecFactory) (*Client, error) {
-	conn, err := net.Dial("tcp", address)
-	if err != nil {
-		return nil, err
-	}
+// 创建客户端，指定底层流数据的出入口，序列化反序列化类方式
+func NewClient(conn io.ReadWriter, codecFactory CodecFactory) (*Client, error) {
 
 	pool := NewWorkerPool(10, nil) // 创建一个没有处理函数的WorkerPool
 	//报文协议
@@ -610,6 +533,8 @@ func (s *Server) NewClient(conn net.Conn) *Client {
 
 	return client
 }
+
+// 网络接入时触发的
 func (s *Server) acceptConnections() {
 	for {
 		conn, err := s.listener.Accept()
@@ -624,17 +549,19 @@ func (s *Server) acceptConnections() {
 	}
 }
 
+// 新链接接入时的动作触发
 func (s *Server) handleNewClient(client *Client) {
 
 	// 在这里处理新的连接
 	err := s.onNewClient(client) // 增加这一行
 	if err != nil {
 		log.Println("handle new client error:", err)
-		client.conn.Close()
 		return
 	}
 
 }
+
+// 参数转换
 func (c *Client) convertArg(arg interface{}, argType reflect.Type) (reflect.Value, error) {
 	converted := c.ConvertToType(arg, argType)
 	if converted == nil {
@@ -643,7 +570,7 @@ func (c *Client) convertArg(arg interface{}, argType reflect.Type) (reflect.Valu
 	return reflect.ValueOf(converted), nil
 }
 
-// 公共的处理rpc请求
+// 客户端xiecheng
 func (c *Client) handleRequest(req *MyPack) {
 
 	// 创建响应对象
@@ -733,7 +660,7 @@ func (c *Client) handleRequest(req *MyPack) {
 	}
 }
 
-// 提供给服务端调用
+// 客户端接受调用协程
 func (c *Client) HandleServerRequest() {
 	c.pool.Start()
 	go func() {
@@ -743,6 +670,7 @@ func (c *Client) HandleServerRequest() {
 	}()
 }
 
+// 客户端发送协程
 func (c *Client) sendRequests() {
 	defer func() {
 		close(c.sendCh)
@@ -756,6 +684,7 @@ func (c *Client) sendRequests() {
 	}
 }
 
+// 客户端接收协程
 func (c *Client) receiveResponses() {
 	defer func() {
 		c.resChs.Range(func(key, value interface{}) bool {
@@ -791,8 +720,8 @@ func (c *Client) receiveResponses() {
 	}
 }
 
-// 带有超时的是
-func (c *Client) CallWithTimeout(req *MyPack, timeout time.Duration) (*MyPack, error) {
+// 客户端请求远端
+func (c *Client) RpcRequest(req *MyPack, timeout time.Duration) (*MyPack, error) {
 	req.Type = RequestType // Call方法
 	req.ID = atomic.AddUint64(&c.seq, 1)
 	resCh := make(chan *MyPack)
@@ -813,11 +742,7 @@ func (c *Client) CallWithTimeout(req *MyPack, timeout time.Duration) (*MyPack, e
 
 }
 
-func (c *Client) Call(req *MyPack, timeout time.Duration) (*MyPack, error) {
-
-	return c.CallWithTimeout(req, time.Second*15)
-}
-
+// 设置引用参的值
 func (c *Client) setArgValue(v reflect.Value, result interface{}) error {
 	if v.Kind() == reflect.Ptr {
 		converted := c.ConvertToType(result, v.Elem().Type())
@@ -829,6 +754,7 @@ func (c *Client) setArgValue(v reflect.Value, result interface{}) error {
 	return nil
 }
 
+// 客户端对rpc进行Invoke调用，带超时
 func (c *Client) InvokeWithTimeout(method string, timeout time.Duration, args ...interface{}) *InvokeResult {
 	// 将参数序列化为字节数组
 	value, err := c.codec.Marshal(args)
@@ -844,7 +770,7 @@ func (c *Client) InvokeWithTimeout(method string, timeout time.Duration, args ..
 	}
 
 	// 发送请求并获取响应
-	res, err := c.CallWithTimeout(req, timeout)
+	res, err := c.RpcRequest(req, timeout)
 	if err != nil {
 		return &InvokeResult{Err: err}
 	}
@@ -878,19 +804,12 @@ func (c *Client) InvokeWithTimeout(method string, timeout time.Duration, args ..
 	return invokeResult
 }
 
+// 客户端对rpc进行Invoke调用
 func (c *Client) Invoke(method string, args ...interface{}) *InvokeResult {
 	return c.InvokeWithTimeout(method, time.Second*15, args...)
 }
-func (c *Client) Reply(req *MyPack, value string) error {
-	res := &MyPack{
-		ID:     req.ID, // 使用原来请求的ID
-		Type:   ResponseType,
-		Result: []byte(value),
-	}
-	c.sendCh <- res
-	return nil
-}
 
+// 客户端注册rpc例程
 func (c *Client) RegisterHandler(name string, handler HandlerFunc) {
 	v := reflect.ValueOf(handler)
 	if v.Kind() != reflect.Func {
@@ -901,7 +820,12 @@ func (c *Client) RegisterHandler(name string, handler HandlerFunc) {
 }
 
 func tttclient(factory CodecFactory) {
-	client, err := Dial("127.0.0.1:6688", factory)
+
+	conn, err := net.Dial("tcp", "127.0.0.1:6688")
+	if err != nil {
+		return
+	}
+	client, err := NewClient(conn, factory)
 	if err != nil {
 		fmt.Println("Error:", err)
 		return
@@ -981,6 +905,7 @@ func tttclient(factory CodecFactory) {
 	fmt.Printf("The code executed in %s\r\n", elapsed)
 	//GenerateWrappers(client.GenerateDocs())
 }
+
 func main() {
 
 	startTime := time.Now() // 获取开始时间
@@ -1034,5 +959,5 @@ func main() {
 		tttclient(factory)
 	}
 
-	time.Sleep(666 * time.Second)
+	time.Sleep(66666 * time.Second)
 }

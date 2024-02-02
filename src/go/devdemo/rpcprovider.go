@@ -13,10 +13,12 @@ func ToUpper(s string, a1, a2, a3 int) string {
 	return strings.ToUpper(s)
 }
 
-func Add(a, b int) int {
+func Add(a, b *int) int {
+	*a += 2
+	*b += 1
 	fmt.Printf("rpc过程 Add被调用了,参数:%d,%d\r\n", a, b)
 	// 函数实现...
-	return a + b
+	return *a + *b
 }
 func Add2(a, b int) (int, int) {
 	fmt.Printf("rpc过程 Add2 被调用了,参数:%d,%d\r\n", a, b)

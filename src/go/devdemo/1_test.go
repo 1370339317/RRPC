@@ -1,6 +1,7 @@
 package main
 
 import (
+	"net"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -43,7 +44,12 @@ func BenchmarkRPC(b *testing.B) {
 				go func() {
 					defer wg.Done()
 
-					client, err := Dial("127.0.0.1:6688", factory)
+					conn, err := net.Dial("tcp", "127.0.0.1:6688")
+					if err != nil {
+						return
+					}
+
+					client, err := NewClient(conn, factory)
 					if err != nil {
 						b.Fatal(err)
 					}
