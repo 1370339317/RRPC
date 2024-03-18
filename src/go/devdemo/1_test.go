@@ -1,6 +1,7 @@
 package main
 
 import (
+	"log"
 	"net"
 	"strconv"
 	"sync"
@@ -14,7 +15,22 @@ var factory CodecFactory = &JsonCodecFactory{}
 
 func TestMain(m *testing.M) {
 	var err error
-	server, err = NewServer("127.0.0.1:6688", func(c *Client) error {
+	server, err = NewServer(func(s *Server) error {
+		listener, err := net.Listen("tcp", "127.0.0.1:6688")
+		if err != nil {
+			return err
+		}
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				log.Println("Accept error:", err)
+				continue
+			}
+			s.AcceptConnections(conn)
+
+		}
+
+	}, func(c *Client) error {
 		c.RegisterHandler("ToUpper", ToUpper)
 		c.RegisterHandler("Add", Add)
 		c.RegisterHandler("Add2", Add2)

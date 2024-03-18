@@ -482,33 +482,30 @@ func NewClient(conn io.ReadWriter, codecFactory CodecFactory) (*Client, error) {
 
 type ClientHandler func(*Client) error
 type Server struct {
-	listener     net.Listener
-	clients      []*Client
+	clients      []*Client //客户端们
 	onNewClient  ClientHandler
 	CodecFactory CodecFactory
 }
 
-func NewServer(address string, onNewClient func(*Client) error, codecFactory CodecFactory) (*Server, error) {
-	listener, err := net.Listen("tcp", address)
-	if err != nil {
-		return nil, err
-	}
+//创建rpc服务端
+//①此处回调,用于监听逻辑.当有客户端成功连入后请调用s.AcceptConnections(conn)
+//②此处回调,当客户端成功连入后,进行的操作.如为其绑定函数等.属于逻辑函数
+func NewServer(ListenCallBack func(s *Server) error, onNewClientCallBack func(*Client) error, codecFactory CodecFactory) (*Server, error) {
 
 	server := &Server{
-		listener:     listener,
 		clients:      make([]*Client, 0),
-		onNewClient:  onNewClient,
+		onNewClient:  onNewClientCallBack,
 		CodecFactory: codecFactory,
 	}
 
-	go server.acceptConnections()
+	go ListenCallBack(server)
 
 	return server, nil
 }
 func (s *Server) Close() error {
-	return s.listener.Close()
+	return nil
 }
-func (s *Server) NewClient(conn net.Conn) *Client {
+func (s *Server) NewClient(conn io.ReadWriter) *Client {
 
 	pool := NewWorkerPool(10, nil)
 	protocol := flexpacketprotocol.New(conn, []byte("aacc"), []byte("eezz"))
@@ -534,19 +531,11 @@ func (s *Server) NewClient(conn net.Conn) *Client {
 	return client
 }
 
-// 网络接入时触发的
-func (s *Server) acceptConnections() {
-	for {
-		conn, err := s.listener.Accept()
-		if err != nil {
-			log.Println("Accept error:", err)
-			continue
-		}
-
-		client := s.NewClient(conn)
-		s.clients = append(s.clients, client)
-		s.handleNewClient(client)
-	}
+//传入对等的服务端通信接口对象
+func (s *Server) AcceptConnections(conn io.ReadWriter) {
+	client := s.NewClient(conn)
+	s.clients = append(s.clients, client)
+	s.handleNewClient(client)
 }
 
 // 新链接接入时的动作触发
@@ -906,8 +895,7 @@ func tttclient(factory CodecFactory) {
 	//GenerateWrappers(client.GenerateDocs())
 }
 
-func main() {
-
+func MarshelspeedTest() {
 	startTime := time.Now() // 获取开始时间
 
 	var dddd []byte
@@ -924,36 +912,53 @@ func main() {
 
 	elapsed := time.Since(startTime) // 计算从startTime到现在所经过的时间
 	fmt.Printf("代码块运行时间: %s\n", elapsed)
+}
+
+func main() {
 
 	factory := &MsgpackCodecFactory{}
 
-	// gob.Register(CustomType{})
-	// _, err := NewServer("127.0.0.1:6688", func(c *Client) error {
-	// 	c.RegisterHandler("ToUpper", ToUpper)
-	// 	c.RegisterHandler("Add", Add)
-	// 	c.RegisterHandler("Add2", Add2)
-	// 	c.RegisterHandler("TestRPCFunc", TestRPCFunc)
+	gob.Register(CustomType{})
+	_, err := NewServer(func(s *Server) error {
+		listener, err := net.Listen("tcp", "127.0.0.1:6688")
+		if err != nil {
+			return err
+		}
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				log.Println("Accept error:", err)
+				continue
+			}
+			s.AcceptConnections(conn)
 
-	// 	if false {
-	// 		remotestub := Lpcstub1{
-	// 			client: c,
-	// 		}
+		}
+	}, func(c *Client) error {
+		c.RegisterHandler("ToUpper", ToUpper)
+		c.RegisterHandler("Add", Add)
+		c.RegisterHandler("Add2", Add2)
+		c.RegisterHandler("TestRPCFunc", TestRPCFunc)
 
-	// 		fmt.Printf("=====新的客户端接入=====\r\n")
-	// 		fmt.Printf("使用桩回调客户端rpc过程Add2\r\n")
-	// 		ret1, ret2, err := remotestub.Add2(1, 2)
-	// 		if err != nil {
-	// 			fmt.Printf("发生错误\r\n")
-	// 			return nil
-	// 		}
-	// 		fmt.Printf("ret1,2:%d %d\r\n", ret1, ret2)
-	// 	}
+		if false {
+			remotestub := Lpcstub1{
+				client: c,
+			}
 
-	// 	return nil
-	// }, factory)
-	// if err != nil {
-	// 	log.Fatal(err)
-	// }
+			fmt.Printf("=====新的客户端接入=====\r\n")
+			fmt.Printf("使用桩回调客户端rpc过程Add2\r\n")
+			ret1, ret2, err := remotestub.Add2(1, 2)
+			if err != nil {
+				fmt.Printf("发生错误\r\n")
+				return nil
+			}
+			fmt.Printf("ret1,2:%d %d\r\n", ret1, ret2)
+		}
+
+		return nil
+	}, factory)
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	for i := 0; i < 4; i++ {
 		tttclient(factory)
